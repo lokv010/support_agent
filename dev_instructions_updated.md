@@ -39,17 +39,12 @@ car-service-voice-system/
 │   ├── __init__.py
 │   ├── twilio_handler.py           # Twilio TwiML generation
 │   ├── session_manager.py          # Session state management
-│   └── context_enrichment.py      # Customer context handling
+│   
 ├── tools/
 │   ├── __init__.py
-│   ├── scheduling.py               # Appointment scheduling
-│   ├── customer_data.py            # CRM operations
-│   └── notifications.py            # SMS/email confirmations
 ├── models/
 │   ├── __init__.py
 │   ├── session.py                  # Session data models
-│   ├── customer.py                 # Customer data models
-│   └── appointment.py              # Appointment data models
 ├── utils/
 │   ├── __init__.py
 │   ├── logger.py                   # Logging configuration
@@ -295,34 +290,7 @@ class OrchestratorSession:
     error_count: int
 ```
 
-### Task 4.2: models/customer.py
 
-Customer data model:
-```python
-@dataclass
-class Customer:
-    id: str
-    name: str
-    phone: str
-    email: Optional[str]
-    vehicle: Vehicle
-    service_history: List[ServiceRecord]
-    preferences: Dict[str, Any]
-```
-
-### Task 4.3: models/appointment.py
-
-Appointment data model:
-```python
-@dataclass
-class Appointment:
-    id: str
-    customer_id: str
-    datetime: datetime
-    service_type: str
-    duration_minutes: int
-    status: str  # scheduled, confirmed, completed, cancelled
-    notes: Optional[str]
 ```
 
 ---
@@ -426,8 +394,7 @@ REALTIME_CONFIG = {
 **Purpose:**
 - Interface with OpenAI Agent Workflow
 - Manage business session state
-- Execute tool calls
-- Generate context-aware responses
+
 
 **Key Methods:**
 ```python
@@ -450,17 +417,8 @@ async def process_message(
     # Execute tool calls if any
     # Return complete response
 
-async def execute_tools(self, tool_calls: List[ToolCall]) -> List[ToolResult]:
-    """Execute business function calls"""
-    # For each tool call:
-    #   - Look up tool handler
-    #   - Execute with args
-    #   - Collect result
-    # Return all results
 
-def register_tool(self, name: str, handler: Callable):
-    """Register a business tool"""
-    # Add to tool registry
+
 
 async def get_conversation_history(
     self, 
@@ -474,56 +432,8 @@ async def end_session(self, conversation_id: str):
     # Persist to database
 ```
 
-**Agent Workflow Request Format:**
-```python
-{
-    "conversation_id": "CONV-12345",
-    "message": "customer utterance",
-    "context": {
-        "customer": {
-            "id": "12345",
-            "name": "John Doe",
-            "phone": "+1234567890",
-            "vehicle": {
-                "make": "Honda",
-                "model": "Civic",
-                "year": 2020
-            }
-        },
-        "service_history": [
-            {
-                "date": "2024-10-15",
-                "service_type": "oil_change",
-                "cost": 59.99
-            }
-        ],
-        "current_time": "2024-11-23T10:30:00Z",
-        "conversation_turn": 3
-    }
-}
-```
 
-**Agent Workflow Response Format:**
-```python
-{
-    "response_text": "Great! I see you're due for an oil change...",
-    "tool_calls": [
-        {
-            "id": "call_123",
-            "name": "check_availability",
-            "args": {
-                "service_type": "oil_change",
-                "preferred_date": "2024-11-26"
-            }
-        }
-    ],
-    "metadata": {
-        "confidence": 0.92,
-        "intent": "schedule_appointment",
-        "next_expected": "customer_time_choice"
-    }
-}
-```
+
 
 ---
 
@@ -536,9 +446,7 @@ async def end_session(self, conversation_id: str):
 **Purpose:**
 - Bridge between voice and business layers
 - Manage all three session types
-- Enrich context
 - Route messages
-- Apply guardrails
 - Handle errors
 
 **Key Methods:**
@@ -569,35 +477,8 @@ async def handle_customer_message(
     # 6. Send to voice layer
     # 7. Update session metrics
 
-async def enrich_context(
-    self, 
-    session_id: str, 
-    base_message: str
-) -> Dict:
-    """Add customer context to message"""
-    # Get customer data
-    # Get service history
-    # Get conversation history
-    # Get current time/date
-    # Return enriched context
 
-async def apply_guardrails(
-    self, 
-    session_id: str, 
-    response: str
-) -> Tuple[bool, str]:
-    """Validate agent response"""
-    # Check for prohibited content
-    # Check turn limits
-    # Check for escalation triggers
-    # Return (is_valid, reason)
 
-async def handle_escalation(self, session_id: str, reason: str):
-    """Handle escalation to human"""
-    # Log escalation
-    # Notify manager
-    # Transfer call
-    # Clean up sessions
 
 async def end_call(self, session_id: str):
     """Clean up all sessions"""
@@ -614,106 +495,11 @@ def list_active_sessions(self) -> List[OrchestratorSession]:
     """Get all active sessions"""
 ```
 
-**Guardrails to Implement:**
-```python
-GUARDRAILS = {
-    "max_turns": 25,
-    "max_turn_duration": 35,  # seconds
-    "prohibited_phrases": [
-        "guaranteed",
-        "diagnose without inspection",
-        "insurance fraud"
-    ],
-    "escalation_keywords": [
-        "lawyer", "attorney", "sue", 
-        "manager", "supervisor",
-        "unacceptable", "furious"
-    ]
-}
-```
+
 
 ---
 
-## STEP 8: TOOLS LAYER
 
-### Task 8.1: tools/scheduling.py
-
-**Functions:**
-```python
-async def schedule_appointment(
-    customer_id: str,
-    datetime: datetime,
-    service_type: str,
-    duration_minutes: int = 30
-) -> Dict:
-    """Schedule a new appointment"""
-    # Check availability
-    # Create appointment in database
-    # Return confirmation
-    
-async def check_availability(
-    service_type: str,
-    preferred_date: str,
-    preferred_time: Optional[str] = None
-) -> Dict:
-    """Check available appointment slots"""
-    # Query calendar
-    # Return available slots
-    
-async def cancel_appointment(
-    appointment_id: str,
-    reason: Optional[str] = None
-) -> Dict:
-    """Cancel an appointment"""
-    # Update status in database
-    # Send cancellation notification
-```
-
-### Task 8.2: tools/customer_data.py
-
-**Functions:**
-```python
-async def get_customer_by_phone(phone: str) -> Optional[Customer]:
-    """Look up customer by phone number"""
-    
-async def get_service_history(customer_id: str) -> List[ServiceRecord]:
-    """Get customer's service history"""
-    
-async def update_customer_info(
-    customer_id: str, 
-    updates: Dict
-) -> Customer:
-    """Update customer information"""
-    
-async def get_vehicle_info(customer_id: str) -> Vehicle:
-    """Get customer's vehicle details"""
-```
-
-### Task 8.3: tools/notifications.py
-
-**Functions:**
-```python
-async def send_sms_confirmation(
-    phone: str, 
-    appointment: Appointment
-) -> bool:
-    """Send SMS appointment confirmation"""
-    # Use Twilio SMS API
-    
-async def send_email_confirmation(
-    email: str, 
-    appointment: Appointment
-) -> bool:
-    """Send email confirmation"""
-    
-async def notify_manager(
-    reason: str, 
-    call_sid: str
-) -> bool:
-    """Notify manager of escalation"""
-```
-
----
 
 ## STEP 9: SERVICES LAYER
 
@@ -767,26 +553,8 @@ async def cleanup_stale_sessions(self, timeout_minutes: int):
     """Clean up sessions older than timeout"""
 ```
 
-### Task 9.3: services/context_enrichment.py
 
-**Class: ContextEnricher**
 
-**Purpose:** Add customer context to messages
-
-**Methods:**
-```python
-async def enrich(
-    self, 
-    message: str, 
-    customer_phone: str
-) -> Dict:
-    """Add full customer context"""
-    # Look up customer
-    # Get service history
-    # Get vehicle info
-    # Add timestamps
-    # Return enriched payload
-```
 
 ---
 
@@ -811,10 +579,7 @@ voice_handler = VoiceInterfaceHandler()
 business_handler = BusinessLogicHandler()
 twilio_handler = TwilioHandler()
 
-# Register business tools
-business_handler.register_tool("schedule_appointment", schedule_appointment)
-business_handler.register_tool("check_availability", check_availability)
-business_handler.register_tool("get_service_history", get_service_history)
+
 # ... more tools
 
 # Flask Routes
@@ -877,8 +642,7 @@ class VoiceConnectionError(LayerError):
 class BusinessLogicTimeout(LayerError):
     """Business logic took too long"""
 
-class ToolExecutionError(LayerError):
-    """Tool execution failed"""
+
 ```
 
 **Error Handling Strategy:**
@@ -894,9 +658,7 @@ except BusinessLogicTimeout:
     # Log error
     # Continue conversation
     
-except ToolExecutionError:
-    # Return error to business logic
-    # Let agent decide how to respond
+
 ```
 
 ---
@@ -912,9 +674,8 @@ logger.info(f"[{call_sid}] Call started")
 logger.info(f"[{call_sid}] Customer: {transcript}")
 logger.info(f"[{call_sid}] Agent: {response}")
 
-# DEBUG: Detailed flow
-logger.debug(f"[{call_sid}] Tool call: {tool_name}({args})")
-logger.debug(f"[{call_sid}] Tool result: {result}")
+
+
 
 # WARNING: Issues but recoverable
 logger.warning(f"[{call_sid}] Retry attempt {n}")
@@ -929,8 +690,6 @@ logger.error(f"[{call_sid}] Connection failed: {error}")
 - Total calls
 - Average call duration
 - Successful bookings
-- Escalation rate
-- Tool success rate
 - Error rate by type
 - Response latency
 
@@ -953,25 +712,11 @@ def test_connection():
 def test_session_creation():
     # Test session initialization
 
-def test_context_enrichment():
-    # Test context added correctly
-
-def test_guardrails():
-    # Test prohibited content blocked
 
 # test_business_logic.py
 def test_agent_workflow_call():
     # Test API call to Agent Workflow
 
-def test_tool_execution():
-    # Test tools execute correctly
-
-# test_tools.py
-def test_schedule_appointment():
-    # Test appointment creation
-
-def test_check_availability():
-    # Test availability checking
 ```
 
 ### Task 13.2: Integration Tests
@@ -1029,16 +774,13 @@ Document:
 4. Transcription events
 
 ### Phase 3: Business Layer (Week 2-3)
-1. Agent Workflow API client
-2. Tool framework
-3. Core business tools (scheduling, customer lookup)
-4. Tool execution
+1. Agent Workflow API client integration
 
 ### Phase 4: Orchestration (Week 3)
 1. Session management
 2. Context enrichment
 3. Message routing
-4. Guardrails
+
 
 ### Phase 5: Integration & Testing (Week 4)
 1. Connect all layers
@@ -1058,7 +800,7 @@ Document:
 
 ### 1. Separation of Concerns
 - Voice layer ONLY handles audio
-- Business layer ONLY handles logic
+- Business layer ONLY handles openai workfloe integration
 - Orchestrator ONLY routes and manages
 
 ### 2. Stateless Where Possible
@@ -1107,8 +849,6 @@ Document:
 
 **DO:**
 - Give comprehensive business instructions
-- Register ALL business tools
-- Provide full customer context
 - Enable conversation history
 
 **DON'T:**
@@ -1119,8 +859,6 @@ Document:
 ### Orchestrator
 
 **DO:**
-- Enrich ALL messages with context
-- Apply guardrails BEFORE sending to voice
 - Track metrics for every session
 - Handle errors gracefully
 

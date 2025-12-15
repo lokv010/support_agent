@@ -139,15 +139,8 @@ car-service-voice-system/
 │   ├── voice_interface.py          # ~150 lines
 │   ├── orchestrator.py             # ~50 lines
 │   └── workflow_client.py          # ~20 lines
-├── tools/
-│   ├── api.py                      # Tool endpoints
-│   ├── customer.py
-│   ├── scheduling.py
-│   └── notifications.py
 ├── models/
 │   ├── session.py
-│   ├── customer.py
-│   └── appointment.py
 ├── utils/
 │   ├── logger.py
 │   └── audio.py
