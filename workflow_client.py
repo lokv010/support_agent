@@ -7,6 +7,7 @@ Your published workflow has all the business logic.
 
 from openai import OpenAI
 import os
+import asyncio
 
 
 class WorkflowClient:
@@ -15,7 +16,7 @@ class WorkflowClient:
         self.workflow_id = os.getenv('AGENT_WORKFLOW_ID')
         self.threads = {}  # call_sid → thread_id
 
-    def create_thread(self, call_sid: str) -> str:
+    async def create_thread(self, call_sid: str) -> str:
         """
         Create conversation thread for this call
 
@@ -25,12 +26,13 @@ class WorkflowClient:
         Returns:
             thread_id
         """
-        thread = self.client.beta.threads.create()
+        # Run synchronous OpenAI SDK call in thread pool to avoid blocking
+        thread = await asyncio.to_thread(self.client.beta.threads.create)
         self.threads[call_sid] = thread.id
         print(f"[{call_sid}] Created thread: {thread.id}")
         return thread.id
 
-    def send_message(self, call_sid: str, text: str) -> str:
+    async def send_message(self, call_sid: str, text: str) -> str:
         """
         Send message to Agent Workflow, get response
 
@@ -50,26 +52,29 @@ class WorkflowClient:
         thread_id = self.threads.get(call_sid)
 
         if not thread_id:
-            thread_id = self.create_thread(call_sid)
+            thread_id = await self.create_thread(call_sid)
 
         print(f"[{call_sid}] → Workflow: {text}")
 
-        # Add message to thread
-        self.client.beta.threads.messages.create(
+        # Add message to thread (run in thread pool to avoid blocking)
+        await asyncio.to_thread(
+            self.client.beta.threads.messages.create,
             thread_id=thread_id,
             role="user",
             content=text
         )
 
-        # Run the workflow
-        run = self.client.beta.threads.runs.create_and_poll(
+        # Run the workflow (run in thread pool to avoid blocking)
+        run = await asyncio.to_thread(
+            self.client.beta.threads.runs.create_and_poll,
             thread_id=thread_id,
             assistant_id=self.workflow_id
         )
 
-        # Get response
+        # Get response (run in thread pool to avoid blocking)
         if run.status == 'completed':
-            messages = self.client.beta.threads.messages.list(
+            messages = await asyncio.to_thread(
+                self.client.beta.threads.messages.list,
                 thread_id=thread_id
             )
 
