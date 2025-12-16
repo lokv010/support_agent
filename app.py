@@ -1,14 +1,13 @@
 """
 Main Application
 
-Simple Flask app that:
+Async web app (Quart) that:
 1. Receives Twilio calls
 2. Opens WebSocket for media stream
 3. Connects voice to workflow
 """
 
-from flask import Flask, request
-from flask_sock import Sock
+from quart import Quart, request, websocket
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 import json
 import os
@@ -20,9 +19,8 @@ from workflow_client import WorkflowClient
 # Load environment
 load_dotenv()
 
-# Initialize Flask
-app = Flask(__name__)
-sock = Sock(app)
+# Initialize Quart (async Flask)
+app = Quart(__name__)
 
 # Initialize handlers
 workflow_client = WorkflowClient()
@@ -36,12 +34,13 @@ print("=" * 70)
 
 
 @app.route('/voice', methods=['POST'])
-def voice_webhook():
+async def voice_webhook():
     """
     Initial call webhook from Twilio
     """
-    call_sid = request.form.get('CallSid')
-    from_number = request.form.get('From')
+    form = await request.form
+    call_sid = form.get('CallSid')
+    from_number = form.get('From')
 
     print(f"[{call_sid}] Incoming call from {from_number}")
 
@@ -57,8 +56,8 @@ def voice_webhook():
     return str(response)
 
 
-@sock.route('/media-stream')
-async def media_stream(ws):
+@app.websocket('/media-stream')
+async def media_stream():
     """
     WebSocket for Twilio media stream
     """
@@ -66,7 +65,7 @@ async def media_stream(ws):
 
     try:
         # Get first message
-        first_message = await ws.receive()
+        first_message = await websocket.receive()
         data = json.loads(first_message)
 
         if data.get('event') == 'start':
@@ -74,7 +73,7 @@ async def media_stream(ws):
             print(f"[{call_sid}] Media stream started")
 
             # Handle the call
-            await voice_handler.handle_call(call_sid, ws)
+            await voice_handler.handle_call(call_sid, websocket)
 
     except Exception as e:
         if call_sid:
@@ -92,4 +91,4 @@ def health():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print(f"Starting server on port {port}...")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
