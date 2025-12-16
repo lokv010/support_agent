@@ -1,200 +1,177 @@
-# CLAUDE CODE: BUILD THIS PROJECT
+# CLAUDE CODE: BUILD THIS (SIMPLE VERSION)
 
-## Project: Car Service Voice AI System
+## Project: Voice Agent System
 
-Build a Python voice system integrating:
-- **Twilio** (phone calls)
-- **OpenAI Realtime API** (voice ↔ text)
-- **OpenAI Agent Workflow** (business brain - already published)
+Connect phone calls to your Agent Workflow via voice.
 
 ---
 
-## Instructions
+## What to Build
 
-**Read and follow:** `DEV_INSTRUCTIONS_UPDATED.md` (complete implementation spec)
+**6 files total:**
 
-**Reference:** `README.md` (project overview)
+```
+voice-agent/
+├── app.py                  # Flask + WebSocket (~50 lines)
+├── voice_handler.py        # OpenAI Realtime (~150 lines)
+├── workflow_client.py      # OpenAI SDK (~80 lines)
+├── utils.py               # Audio conversion (~30 lines)
+├── requirements.txt        # Dependencies
+└── README.md              # Docs
+```
+
 
 ---
 
-## Key Architecture Principles
+## Simple Flow
 
-### 1. Your Code is THIN
 ```
-Voice Layer: Audio ↔ Text ONLY (~150 lines)
-Orchestrator: Just routing (~50 lines)
-Workflow Client: HTTP client (~20 lines)
-Tool APIs: Simple endpoints (~200 lines)
-
-Total: ~500 lines of simple code
-```
-
-### 2. Agent Workflow is SMART
-```
-Agent Workflow (OpenAI handles):
-- Understands intent
-- Fetches context (calls YOUR tools)
-- Executes operations (calls YOUR tools)
-- Multi-step reasoning
-- Returns final response
-```
-
-### 3. NO Manual Work
-```
-❌ DON'T manually enrich context
-❌ DON'T manually execute tools
-❌ DON'T manually orchestrate workflows
-
-✅ DO call Agent Workflow API
-✅ DO provide tool endpoints
-✅ DO route messages
+Customer speaks
+    ↓
+OpenAI Realtime (STT - Speech to Text)
+    ↓
+Agent Workflow via OpenAI SDK (brain - does everything)
+    ↓
+OpenAI Realtime (TTS - Text to Speech)
+    ↓
+Customer hears
 ```
 
 ---
 
-## Build Order
+## Read This
 
-Follow DEV_INSTRUCTIONS_UPDATED.md steps:
+**Complete spec:** `DEV_INSTRUCTIONS_SIMPLE.md`
 
-1. **STEP 1:** Project setup (structure, requirements.txt, .env.example)
-2. **STEP 2:** Utilities (audio.py, logger.py)
-3. **STEP 3:** Data models (session.py, customer.py, appointment.py)
-4. **STEP 4:** Voice interface layer (OpenAI Realtime)
-5. **STEP 5:** Workflow client (simple HTTP)
-6. **STEP 6:** Orchestrator (routing)
-7. **STEP 7:** Tool APIs (4 endpoints)
-8. **STEP 8:** Main app.py
-9. **STEP 9:** Agent Workflow config docs
-10. **STEP 10:** Tests
+Follow it step-by-step:
+- STEP 1: Setup (requirements.txt, .env)
+- STEP 2: utils.py (audio conversion)
+- STEP 3: workflow_client.py (OpenAI SDK workflow integration)
+- STEP 4: voice_handler.py (OpenAI Realtime)
+- STEP 5: app.py (Flask + WebSocket)
+- STEP 6: README.md
 
 ---
 
-## Critical Implementation Notes
+## Key Points
 
-### Voice Layer (STEP 4)
+### 1. NO Tool Endpoints
+The Agent Workflow is already published with all business logic.
+You're just connecting voice to it.
+
+### 2. Use OpenAI SDK
 ```python
-class VoiceInterfaceHandler:
-    config = {
-        "tools": [],  # NO business tools!
-        "instructions": "You are a voice interface. NO business decisions."
-    }
+from openai import OpenAI
+
+client = OpenAI()
+thread = client.beta.threads.create()
+client.beta.threads.messages.create(thread_id, ...)
+run = client.beta.threads.runs.create_and_poll(thread_id, assistant_id)
 ```
 
-### Orchestrator (STEP 6)
+### 3. Simple Integration
 ```python
-async def handle_transcription(call_sid, text):
-    # Apply guardrails
-    # Send to workflow (no context enrichment!)
-    result = await workflow_client.send_message(
-        conversation_id,
-        text,
-        customer_phone  # Just identifier!
-    )
-    # Send to voice layer
-```
+# Voice handler gets transcription
+transcript = "I need an oil change"
 
-### Workflow Client (STEP 5)
-```python
-async def send_message(conversation_id, message, customer_phone):
-    # ONE HTTP call, get final response
-    response = await http_post(
-        f"{workflow_url}/messages",
-        json={"message": message, "customer_phone": customer_phone}
-    )
-    return response["response"]  # Tools already executed!
-```
+# Send to workflow
+response = workflow_client.send_message(call_sid, transcript)
 
-### Tool APIs (STEP 7)
-```python
-# Agent Workflow CALLS these
+# Workflow returns final answer
+# "We have Tuesday at 9 AM or Thursday at 2 PM"
 
-@app.route('/tools/get-customer', methods=['POST'])
-async def get_customer():
-    phone = request.json['phone']
-    customer = await lookup(phone)
-    return jsonify(customer.to_dict())
-
-@app.route('/tools/get-history', methods=['POST'])
-async def get_history():
-    customer_id = request.json['customer_id']
-    history = await get_history(customer_id)
-    return jsonify({"history": history})
-
-# + check-availability, schedule-appointment
+# Voice handler speaks it
 ```
 
 ---
 
-## Expected Output
+## Critical Implementation
 
-After building, the project should have:
-
+### workflow_client.py
+```python
+class WorkflowClient:
+    def send_message(self, call_sid, text):
+        # Add message to thread
+        self.client.beta.threads.messages.create(
+            thread_id=self.threads[call_sid],
+            role="user",
+            content=text
+        )
+        
+        # Run workflow
+        run = self.client.beta.threads.runs.create_and_poll(
+            thread_id=self.threads[call_sid],
+            assistant_id=self.workflow_id
+        )
+        
+        # Return response
+        messages = self.client.beta.threads.messages.list(...)
+        return messages.data[0].content[0].text.value
 ```
-car-service-voice-system/
-├── README.md
-├── requirements.txt
-├── .env.example
-├── app.py                          # Flask + WebSocket
-├── layers/
-│   ├── voice_interface.py          # ~150 lines
-│   ├── orchestrator.py             # ~50 lines
-│   └── workflow_client.py          # ~20 lines
-├── tools/
-│   ├── api.py                      # Tool endpoints
-│   ├── customer.py
-│   ├── scheduling.py
-│   └── notifications.py
-├── models/
-│   ├── session.py
-│   ├── customer.py
-│   └── appointment.py
-├── utils/
-│   ├── logger.py
-│   └── audio.py
-└── tests/
-    ├── test_voice.py
-    ├── test_orchestrator.py
-    └── test_tools.py
+
+### voice_handler.py
+```python
+# When customer speaks:
+if event_type == 'conversation.item.input_audio_transcription.completed':
+    transcript = data.get('transcript')
+    
+    # Send to workflow
+    response_text = self.workflow_client.send_message(call_sid, transcript)
+    
+    # Tell OpenAI Realtime to speak it
+    await openai_ws.send({
+        "type": "response.create",
+        "response": {
+            "instructions": f"Say this: {response_text}"
+        }
+    })
 ```
 
 ---
 
 ## Success Criteria
 
-- ✅ All files created per DEV_INSTRUCTIONS_UPDATED.md
-- ✅ Voice layer: NO business tools in config
-- ✅ Orchestrator: NO context enrichment logic
-- ✅ Workflow client: Simple HTTP calls only
-- ✅ Tool APIs: 4 endpoints implemented
-- ✅ app.py: Flask + WebSocket working
-- ✅ Tests: Basic test structure
-- ✅ Type hints throughout
-- ✅ Comprehensive logging with call_sid
+After building:
+- ✅ All 6 files created
+- ✅ Flask app runs
+- ✅ WebSocket connects
+- ✅ OpenAI Realtime integration works
+- ✅ Workflow integration works (OpenAI SDK)
+- ✅ Audio conversion works
+- ✅ End-to-end call works
 
 ---
 
-## Start Here
+## What NOT to Build
 
-1. Create project structure (STEP 1)
-2. Read each STEP in DEV_INSTRUCTIONS_UPDATED.md
-3. Implement each file as specified
-4. Keep it SIMPLE - no extra complexity
-5. Follow the principle: Your code is thin, Agent Workflow is smart
+- ❌ Tool API endpoints
+- ❌ Database code
+- ❌ Context enrichment logic
+- ❌ Manual tool execution
+- ❌ CRM integrations
 
-**Estimated time: 1 day**
-
----
-
-## Questions?
-
-Refer to:
-- **DEV_INSTRUCTIONS_UPDATED.md** - Complete spec (~8,000 lines)
-- **README.md** - Project overview (~1,500 lines)
-- **ULTRA_SIMPLIFIED_ARCHITECTURE.md** - Architecture deep-dive
-- **CORRECTED_BUSINESS_LOGIC.md** - Why this design
-
-All questions should be answered in these docs.
+**Why?** Your Agent Workflow already has all of this!
 
 ---
 
-**Let's build! 🚀**
+## Start Building
+
+1. Read `DEV_INSTRUCTIONS_SIMPLE.md` completely
+2. Create project structure
+3. Implement step-by-step
+4. Keep it simple - exactly as spec'd
+5. Don't add complexity
+
+
+---
+
+## The Rule
+
+**If you're writing more than 300 lines of code, you're doing it wrong.**
+
+This is a simple voice interface to your Agent Workflow.
+Nothing more, nothing less.
+
+---
+
+**Let's keep it simple! 🚀**
