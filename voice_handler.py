@@ -14,14 +14,15 @@ import asyncio
 import json
 import websockets
 import os
-from utils import mulaw_to_pcm16, pcm16_to_mulaw, encode_base64, decode_base64
-
+import audioop
+import base64
 
 class VoiceHandler:
     def __init__(self, workflow_client):
         self.workflow_client = workflow_client
         self.api_key = os.getenv('OPENAI_API_KEY')
         self.connections = {}  # call_sid → openai_ws
+
 
     async def connect(self, call_sid: str):
         """Connect to OpenAI Realtime API"""
@@ -110,7 +111,16 @@ class VoiceHandler:
 
         except Exception as e:
             print(f"[{call_sid}] Customer audio error: {e}")
+        async def mulaw_to_pcm16(mulaw_data: bytes) -> bytes:
+            """Convert Twilio mulaw to OpenAI PCM16"""
+            return audioop.ulaw2lin(mulaw_data, 2)
+        def encode_base64(data: bytes) -> str:
+            """Encode to base64 string"""
+            return base64.b64encode(data).decode('utf-8')
 
+        def decode_base64(data: str) -> bytes:
+                """Decode from base64 string"""
+                return base64.b64decode(data)
     async def _stream_agent_audio(self, call_sid: str, twilio_ws, openai_ws):
         """
         Stream agent audio: OpenAI Realtime → Twilio
@@ -161,6 +171,18 @@ class VoiceHandler:
 
         except Exception as e:
             print(f"[{call_sid}] Agent audio error: {e}")
+        def encode_base64(data: bytes) -> str:
+            """Encode to base64 string"""
+            return base64.b64encode(data).decode('utf-8')
+
+        def decode_base64(data: str) -> bytes:
+            """Decode from base64 string"""
+            return base64.b64decode(data)
+        def pcm16_to_mulaw(pcm_data: bytes) -> bytes:
+            """Convert OpenAI PCM16 to Twilio mulaw"""
+            return audioop.lin2ulaw(pcm_data, 2)
+
+
 
     async def cleanup(self, call_sid: str):
         """Clean up connections"""

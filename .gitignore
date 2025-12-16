@@ -2,6 +2,10 @@
 .env
 *.log
 logs/
+supenv/
+supenv/bin/
+supenv/lib/
+supenv/include/
 
 # Static files
 static/audio/*
@@ -37,3 +41,4 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
