@@ -44,9 +44,8 @@ async def voice_webhook():
 
     print(f"[{call_sid}] Incoming call from {from_number}")
 
-    # Generate TwiML with Stream
+    # Generate TwiML with Stream (no Say - greeting will come from OpenAI)
     response = VoiceResponse()
-    response.say("Hello! How can I help you today?")
 
     connect = Connect()
     stream = Stream(url=f"wss://{request.host}/media-stream")
