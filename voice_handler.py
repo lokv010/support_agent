@@ -94,7 +94,7 @@ class VoiceHandler:
         openai_ws = self.connections[call_sid]
 
         # Create workflow thread
-        self.workflow_client.create_thread(call_sid)
+        await self.workflow_client.create_thread(call_sid)
 
         try:
             # Run both audio streams concurrently
@@ -156,7 +156,7 @@ class VoiceHandler:
                         print(f"[{call_sid}] Customer said: {transcript}")
 
                         # Send to workflow, get response
-                        response_text = self.workflow_client.send_message(
+                        response_text = await self.workflow_client.send_message(
                             call_sid,
                             transcript
                         )
