@@ -3,7 +3,7 @@
 Simple voice AI system connecting:
 - Twilio (phone calls)
 - OpenAI Realtime (voice)
-- OpenAI Agent Workflow (brain)
+- OpenAI Agents SDK (brain)
 
 ## Overview
 
@@ -11,7 +11,7 @@ This system enables natural voice conversations between customers and an AI assi
 - Scheduling service appointments
 - Checking service history
 - Getting appointment availability
-- Any other business logic your Agent Workflow handles
+- Any other business logic your Agent handles
 
 ### Architecture
 
@@ -20,29 +20,29 @@ Customer speaks
     ↓
 OpenAI Realtime (STT - Speech to Text)
     ↓
-Agent Workflow (OpenAI SDK - thinks, decides, acts)
+OpenAI Agents SDK (thinks, decides, acts with tools)
     ↓
 OpenAI Realtime (TTS - Text to Speech)
     ↓
 Customer hears
 ```
 
-**Key Design Principle:** Your code = thin voice interface. Agent Workflow = smart brain.
+**Key Design Principle:** Your code = thin voice interface. OpenAI Agent = smart brain.
 
 ## What This Code Does
 
-This is a **simple voice interface** to your Agent Workflow. It:
+This is a **simple voice interface** to your OpenAI Agent. It:
 - ✅ Connects Twilio phone calls to OpenAI Realtime
 - ✅ Streams audio bidirectionally
-- ✅ Converts transcriptions to workflow messages
-- ✅ Speaks workflow responses
+- ✅ Converts transcriptions to agent messages
+- ✅ Speaks agent responses
 
 ## What This Code Does NOT Do
 
-- ❌ Business logic (your workflow handles this)
-- ❌ Context enrichment (your workflow handles this)
-- ❌ Tool execution (your workflow handles this)
-- ❌ Database operations (your workflow calls tools for this)
+- ❌ Business logic (your agent handles this)
+- ❌ Context enrichment (your agent handles this)
+- ❌ Tool execution (your agent handles this with tools)
+- ❌ Database operations (your agent calls tools for this)
 
 **Total: ~300 lines of code**
 
@@ -53,7 +53,6 @@ This is a **simple voice interface** to your Agent Workflow. It:
 - Python 3.10+
 - Twilio account
 - OpenAI API key
-- Published OpenAI Agent Workflow (with your business logic)
 - Public HTTPS endpoint (for webhooks)
 
 ---
@@ -84,9 +83,6 @@ WEBHOOK_URL=https://your-domain.com
 # OpenAI
 OPENAI_API_KEY=sk-xxxxx
 
-# Agent Workflow
-AGENT_WORKFLOW_ID=workflow_xxxxx  # Your published workflow ID
-
 # Server
 PORT=5000
 ```
@@ -102,7 +98,7 @@ You should see:
 ======================================================================
 VOICE AGENT SYSTEM STARTED
 ======================================================================
-Workflow ID: workflow_xxxxx
+Using OpenAI Agents SDK
 ======================================================================
 Starting server on port 5000...
 ```
@@ -115,14 +111,27 @@ In Twilio Console:
 3. Set to HTTP POST
 4. Save
 
-### 5. Test
+### 5. Customize Your Agent
+
+Edit `workflow_client.py` to customize your agent's behavior:
+
+```python
+self.agent = Agent(
+    name="Support Assistant",
+    instructions="""Your custom instructions here...""",
+    # Add tools for business logic
+    # tools=[check_availability, schedule_appointment]
+)
+```
+
+### 6. Test
 
 Call your Twilio number and speak!
 
-Your Agent Workflow handles everything:
+Your Agent handles everything:
 - Understanding what you said
-- Fetching any context it needs
-- Executing actions
+- Calling tools if configured
+- Maintaining conversation context
 - Generating responses
 
 ---
@@ -133,7 +142,7 @@ Your Agent Workflow handles everything:
 voice-agent/
 ├── app.py                  # Flask + WebSocket (~50 lines)
 ├── voice_handler.py        # OpenAI Realtime (~150 lines)
-├── workflow_client.py      # OpenAI SDK (~80 lines)
+├── workflow_client.py      # OpenAI Agents SDK (~90 lines)
 ├── utils.py               # Audio conversion (~30 lines)
 ├── requirements.txt        # Dependencies
 ├── .env.example           # Environment template
@@ -146,7 +155,7 @@ voice-agent/
 
 - `app.py` - Flask app + WebSocket handler
 - `voice_handler.py` - OpenAI Realtime integration for voice
-- `workflow_client.py` - Agent Workflow integration via OpenAI SDK
+- `workflow_client.py` - Agent integration via OpenAI Agents SDK
 - `utils.py` - Audio format conversion (mulaw ↔ PCM16)
 
 ---
@@ -161,12 +170,12 @@ voice-agent/
 # 1. OpenAI Realtime transcribes
 transcript = "I need an oil change"
 
-# 2. Send to Agent Workflow
+# 2. Send to Agent
 response = workflow_client.send_message(call_sid, transcript)
-# Workflow does EVERYTHING:
+# Agent does EVERYTHING:
 #   - Understands intent
-#   - Looks up customer (if needed)
-#   - Checks availability (if needed)
+#   - Calls tools if configured (e.g., check availability)
+#   - Maintains conversation context
 #   - Generates response
 
 # 3. OpenAI Realtime speaks response
@@ -185,7 +194,8 @@ response = workflow_client.send_message(call_sid, transcript)
    - Twilio → OpenAI (customer audio)
    - OpenAI → Twilio (agent audio)
 6. On transcription:
-   - Send to workflow via OpenAI SDK
+   - Send to agent via OpenAI Agents SDK
+   - Agent processes (calls tools if needed)
    - Get response
    - Tell OpenAI Realtime to speak it
 7. Repeat until call ends
@@ -214,15 +224,14 @@ response = workflow_client.send_message(call_sid, transcript)
 
 **If you're writing more than 300 lines of code, you're doing it wrong.**
 
-This is a simple voice interface to your Agent Workflow. Nothing more, nothing less.
+This is a simple voice interface to your OpenAI Agent. Nothing more, nothing less.
 
-Your Agent Workflow already has:
-- ✅ All business logic
-- ✅ All tools
-- ✅ All data access
-- ✅ All intelligence
+Define your agent in `workflow_client.py` with:
+- ✅ Instructions (what the agent should do)
+- ✅ Tools (functions it can call)
+- ✅ Session management (conversation memory)
 
-You just need to connect voice to it.
+The OpenAI Agents SDK handles the rest. You just connect voice to it.
 
 ---
 
@@ -244,10 +253,11 @@ You just need to connect voice to it.
 - Verify OpenAI API key is valid
 - Ensure HTTPS is working (Twilio requires HTTPS)
 
-**Workflow not responding:**
-- Verify `AGENT_WORKFLOW_ID` is correct
-- Check OpenAI API key has access to workflows
+**Agent not responding:**
+- Check OpenAI API key is valid
+- Verify agent instructions are clear
 - Look for errors in logs with `[call_sid]` prefix
+- Check if tools are properly configured (if using any)
 
 ---
 
