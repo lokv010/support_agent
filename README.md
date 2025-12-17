@@ -53,7 +53,8 @@ This is a **simple voice interface** to your Agent Workflow. It:
 - Python 3.10+
 - Twilio account
 - OpenAI API key
-- Published OpenAI Agent Workflow (with your business logic)
+- **OpenAI Assistant** (create at [platform.openai.com/assistants](https://platform.openai.com/assistants))
+  - ⚠️ **IMPORTANT:** Must be an Assistant (ID starts with `asst_`), NOT a Workflow (ID starts with `wf_`)
 - Public HTTPS endpoint (for webhooks)
 
 ---
@@ -84,8 +85,8 @@ WEBHOOK_URL=https://your-domain.com
 # OpenAI
 OPENAI_API_KEY=sk-xxxxx
 
-# Agent Workflow
-AGENT_WORKFLOW_ID=workflow_xxxxx  # Your published workflow ID
+# OpenAI Assistant (IMPORTANT: Must be Assistant ID, NOT Workflow ID!)
+AGENT_WORKFLOW_ID=asst_xxxxx  # Your OpenAI Assistant ID (starts with "asst_")
 
 # Server
 PORT=5000
@@ -239,14 +240,25 @@ You just need to connect voice to it.
 
 ### Common Issues
 
+**❌ Error: "Invalid 'assistant_id': Expected an ID that begins with 'asst'"**
+
+**Cause:** You're using a Workflow ID (`wf_...`) instead of an Assistant ID (`asst_...`)
+
+**Solution:** See `FIX_AUDIO_ISSUE.md` for detailed fix instructions. Summary:
+1. Create an Assistant at [platform.openai.com/assistants](https://platform.openai.com/assistants)
+2. Copy the Assistant ID (starts with `asst_`)
+3. Update your `AGENT_WORKFLOW_ID` environment variable
+4. Restart the server
+
 **No audio heard:**
 - Check WebSocket connection in logs
 - Verify OpenAI API key is valid
 - Ensure HTTPS is working (Twilio requires HTTPS)
+- Make sure you're using an Assistant ID, not a Workflow ID (see above)
 
-**Workflow not responding:**
-- Verify `AGENT_WORKFLOW_ID` is correct
-- Check OpenAI API key has access to workflows
+**Assistant not responding:**
+- Verify `AGENT_WORKFLOW_ID` contains a valid Assistant ID (starts with `asst_`)
+- Check OpenAI API key has access to assistants
 - Look for errors in logs with `[call_sid]` prefix
 
 ---

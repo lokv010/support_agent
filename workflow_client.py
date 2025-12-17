@@ -2,7 +2,13 @@
 Agent Workflow Integration using OpenAI SDK
 
 This is the BRAIN of the system.
-Your published workflow has all the business logic.
+Your published assistant has all the business logic.
+
+IMPORTANT: Despite the variable name 'AGENT_WORKFLOW_ID', this must be an
+OpenAI Assistant ID (starts with 'asst_'), NOT a Workflow ID (starts with 'wf_').
+
+Workflows from Agent Builder cannot be used directly with the Assistants API.
+You must create an Assistant at: https://platform.openai.com/assistants
 """
 
 from openai import OpenAI
@@ -15,6 +21,16 @@ class WorkflowClient:
         self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.workflow_id = os.getenv('AGENT_WORKFLOW_ID')
         self.threads = {}  # call_sid → thread_id
+
+        # Validate that we have an assistant ID, not a workflow ID
+        if self.workflow_id and self.workflow_id.startswith('wf_'):
+            raise ValueError(
+                f"Invalid AGENT_WORKFLOW_ID: '{self.workflow_id}'. "
+                f"Expected an Assistant ID starting with 'asst_', not a Workflow ID starting with 'wf_'. "
+                f"Please create an OpenAI Assistant at https://platform.openai.com/assistants "
+                f"and update your AGENT_WORKFLOW_ID environment variable. "
+                f"See FIX_AUDIO_ISSUE.md for detailed instructions."
+            )
 
     async def create_thread(self, call_sid: str) -> str:
         """
@@ -64,7 +80,8 @@ class WorkflowClient:
             content=text
         )
 
-        # Run the workflow (run in thread pool to avoid blocking)
+        # Run the assistant (run in thread pool to avoid blocking)
+        # Note: self.workflow_id contains an assistant ID (asst_...), despite the variable name
         run = await asyncio.to_thread(
             self.client.beta.threads.runs.create_and_poll,
             thread_id=thread_id,
