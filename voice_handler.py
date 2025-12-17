@@ -12,6 +12,7 @@ Does NOT handle:
 
 import asyncio
 import json
+from flask import logging
 import websockets
 import os
 import audioop
@@ -115,11 +116,12 @@ class VoiceHandler:
             while True:
                 message = await twilio_ws.receive()
                 if message is None:
+                    print(f"[{call_sid}] Customer WebSocket closed")
                     break
 
                 data = json.loads(message)
-
-                if data.get('event') == 'media':
+                event=data.get('event') 
+                if event == 'media':
                     # Get audio from Twilio
                     mulaw_data = decode_base64(data['media']['payload'])
 
@@ -132,7 +134,8 @@ class VoiceHandler:
                         "audio": encode_base64(pcm_data)
                     }))
 
-                elif data.get('event') == 'stop':
+                elif event == 'stop':
+                    print(f"[{call_sid}] Customer stream ended")
                     break
 
         except Exception as e:

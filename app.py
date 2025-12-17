@@ -7,6 +7,7 @@ Async web app (Quart) that:
 3. Connects voice to workflow
 """
 
+from flask import logging
 from quart import Quart, request, websocket
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 import json
@@ -63,16 +64,18 @@ async def media_stream():
     call_sid = None
 
     try:
+        while True:
         # Get first message
-        first_message = await websocket.receive()
-        data = json.loads(first_message)
+            first_message = await websocket.receive()
+            data = json.loads(first_message)
 
-        if data.get('event') == 'start':
-            call_sid = data['start']['callSid']
-            print(f"[{call_sid}] Media stream started")
+            if data.get('event') == 'start':
+                call_sid = data['start']['callSid']
+                print(f"[{call_sid}] Media stream started")
+                break
 
-            # Handle the call
-            await voice_handler.handle_call(call_sid, websocket)
+                # Handle the call
+        await voice_handler.handle_call(call_sid, websocket)
 
     except Exception as e:
         if call_sid:
