@@ -5,6 +5,9 @@ quart-cors==0.7.0
 # OpenAI SDK
 openai>=1.54.0
 
+# OpenAI Agents SDK
+openai-agents
+
 # WebSockets
 websockets==12.0
 

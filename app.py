@@ -30,7 +30,7 @@ voice_handler = VoiceHandler(workflow_client)
 print("=" * 70)
 print("VOICE AGENT SYSTEM STARTED")
 print("=" * 70)
-print(f"Workflow ID: {os.getenv('AGENT_WORKFLOW_ID')}")
+print("Using OpenAI Agents SDK")
 print("=" * 70)
 
 

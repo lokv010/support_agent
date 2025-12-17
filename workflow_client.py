@@ -1,46 +1,62 @@
 """
-Agent Workflow Integration using OpenAI SDK
+Agent Integration using OpenAI Agents SDK
 
 This is the BRAIN of the system.
-Your published workflow has all the business logic.
+Simple agent with instructions and tools.
 """
 
-from openai import OpenAI
+from agents import Agent, Runner, InMemorySession
 import os
 import asyncio
 
 
 class WorkflowClient:
     def __init__(self):
-        self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        self.workflow_id = os.getenv('AGENT_WORKFLOW_ID')
-        self.threads = {}  # call_sid → thread_id
+        # Define your agent with instructions
+        # Customize this based on your use case (scheduling, support, etc.)
+        self.agent = Agent(
+            name="Support Assistant",
+            instructions="""You are a helpful customer support assistant.
+
+Your role is to:
+- Greet customers warmly
+- Answer their questions
+- Help with scheduling appointments
+- Provide information about services
+- Handle requests professionally
+
+Keep responses concise and conversational since this is a voice call.
+""",
+            # Add tools here if needed (e.g., check availability, schedule appointment)
+            # tools=[check_availability, schedule_appointment]
+        )
+
+        # Track sessions per call
+        self.sessions = {}  # call_sid → InMemorySession
 
     async def create_thread(self, call_sid: str) -> str:
         """
-        Create conversation thread for this call
+        Create conversation session for this call
 
         Args:
             call_sid: Twilio call SID
 
         Returns:
-            thread_id
+            session_id (same as call_sid)
         """
-        # Run synchronous OpenAI SDK call in thread pool to avoid blocking
-        thread = await asyncio.to_thread(self.client.beta.threads.create)
-        self.threads[call_sid] = thread.id
-        print(f"[{call_sid}] Created thread: {thread.id}")
-        return thread.id
+        session = InMemorySession(session_id=call_sid)
+        self.sessions[call_sid] = session
+        print(f"[{call_sid}] Created session")
+        return call_sid
 
     async def send_message(self, call_sid: str, text: str) -> str:
         """
-        Send message to Agent Workflow, get response
+        Send message to Agent, get response
 
         This is where ALL the magic happens:
-        - Workflow understands intent
-        - Workflow fetches any context it needs
-        - Workflow executes any actions
-        - Workflow returns final response
+        - Agent understands intent
+        - Agent can call tools if configured
+        - Agent generates response
 
         Args:
             call_sid: Call SID
@@ -49,47 +65,30 @@ class WorkflowClient:
         Returns:
             Agent response text (for TTS)
         """
-        thread_id = self.threads.get(call_sid)
+        session = self.sessions.get(call_sid)
 
-        if not thread_id:
-            thread_id = await self.create_thread(call_sid)
+        if not session:
+            await self.create_thread(call_sid)
+            session = self.sessions[call_sid]
 
-        print(f"[{call_sid}] → Workflow: {text}")
+        print(f"[{call_sid}] → Agent: {text}")
 
-        # Add message to thread (run in thread pool to avoid blocking)
-        await asyncio.to_thread(
-            self.client.beta.threads.messages.create,
-            thread_id=thread_id,
-            role="user",
-            content=text
+        # Run the agent with the message
+        # Use asyncio.to_thread for the synchronous Runner.run_sync call
+        result = await asyncio.to_thread(
+            Runner.run_sync,
+            self.agent,
+            text,
+            session=session
         )
 
-        # Run the workflow (run in thread pool to avoid blocking)
-        run = await asyncio.to_thread(
-            self.client.beta.threads.runs.create_and_poll,
-            thread_id=thread_id,
-            assistant_id=self.workflow_id
-        )
+        response_text = result.final_output
+        print(f"[{call_sid}] ← Agent: {response_text}")
 
-        # Get response (run in thread pool to avoid blocking)
-        if run.status == 'completed':
-            messages = await asyncio.to_thread(
-                self.client.beta.threads.messages.list,
-                thread_id=thread_id
-            )
-
-            # Get the latest assistant message
-            for message in messages.data:
-                if message.role == "assistant":
-                    response_text = message.content[0].text.value
-                    print(f"[{call_sid}] ← Workflow: {response_text}")
-                    return response_text
-
-        # Fallback
-        return "I'm having trouble right now. Let me transfer you to our team."
+        return response_text
 
     def cleanup(self, call_sid: str):
-        """Clean up thread"""
-        if call_sid in self.threads:
-            del self.threads[call_sid]
-            print(f"[{call_sid}] Thread cleaned up")
+        """Clean up session"""
+        if call_sid in self.sessions:
+            del self.sessions[call_sid]
+            print(f"[{call_sid}] Session cleaned up")
