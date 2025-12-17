@@ -8,14 +8,17 @@ openai>=1.54.0
 # OpenAI Agents SDK
 openai-agents
 
+# MCP SDK for tool integration
+mcp
+
 # WebSockets
 websockets==12.0
 
 # Twilio
 twilio==8.10.0
 
-# Audio
-audioop-lts
+# Audio (audioop is built-in for Python < 3.13, use audioop-lts for 3.13+)
+# audioop-lts
 
 # HTTP Client
 aiohttp==3.9.1
