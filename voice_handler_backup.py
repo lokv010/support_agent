@@ -60,31 +60,60 @@ class VoiceHandler:
                 "modalities": ["text", "audio"],
                 "instructions": "You are a voice interface. Just listen and speak what you're told.",
                 "voice": "alloy",
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "silence_duration_ms": 500
-                },
+                "input_audio_format": "g711_ulaw",
+                "output_audio_format": "g711_ulaw",
                 "input_audio_transcription": {
                     "model": "whisper-1"
+                },
+                "turn_detection":{
+                    "type": "server_vad",
+                    "threshold":0.5,
+                    "silence_duration_ms":700,
+                    "prefix_padding_ms":300
                 }
             }
         }))
 
-        print(f"[{call_sid}] Connected to OpenAI Realtime")
+        timeout = 5  # seconds
+        start_time = asyncio.get_event_loop().time()
+        
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            try:
+                message = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                data = json.loads(message)
+                
+                if data.get('type') == 'session.updated':
+                    print(f"[{call_sid}] Session configured successfully")
+                    break
+                elif data.get('type') == 'error':
+                    print(f"[{call_sid}] Session config error: {data.get('error')}")
+                    raise Exception(f"Session config failed: {data.get('error')}")
+            except asyncio.TimeoutError:
+                continue
 
-        # Send initial greeting
+        print(f"[{call_sid}] Connected to OpenAI Realtime")
         await ws.send(json.dumps({
-            "type": "response.create",
-            "response": {
-                "modalities": ["audio"],
-                "instructions": "Say this: Hello! How can I help you today?"
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "greet the customer and ask how you can help them."
+                    }
+                ]
             }
         }))
 
-    async def handle_call(self, call_sid: str, twilio_ws):
+        # ✅ ADD: Then trigger response
+        await ws.send(json.dumps({
+            "type": "response.create",
+            "response": {"modalities": ["audio", "text"]}
+        }))
+
+
+    async def handle_call(self, call_sid: str, stream_sid: str, twilio_ws):
         """
         Handle complete call
 
@@ -93,7 +122,8 @@ class VoiceHandler:
         # Connect to OpenAI
         await self.connect(call_sid)
         openai_ws = self.connections[call_sid]
-
+        self.stream_sids=getattr(self,'stream_sids',{})
+        self.stream_sids[call_sid]=stream_sid
         # Create workflow thread
         await self.workflow_client.create_thread(call_sid)
 
@@ -122,22 +152,12 @@ class VoiceHandler:
                 data = json.loads(message)
                 event=data.get('event') 
                 if event == 'media':
-                    # Get audio from Twilio
-                    mulaw_data = decode_base64(data['media']['payload'])
-
-                    # Convert to PCM16
-                    pcm_data = mulaw_to_pcm16(mulaw_data)
-
+                    audio_payload = data['media']['payload']  
                     # Send to OpenAI
                     await openai_ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
-                        "audio": encode_base64(pcm_data)
+                        "audio": audio_payload
                     }))
-
-                elif event == 'stop':
-                    print(f"[{call_sid}] Customer stream ended")
-                    break
-
         except Exception as e:
             print(f"[{call_sid}] Customer audio error: {e}")
 
@@ -146,51 +166,96 @@ class VoiceHandler:
         Stream agent audio: OpenAI Realtime → Twilio
         AND handle transcriptions → workflow
         """
+        stream_sid = self.stream_sids.get(call_sid)
+        audio_started = False
+        
         try:
             async for message in openai_ws:
                 data = json.loads(message)
                 event_type = data.get('type')
 
-                # Customer finished speaking - transcription ready
+                # ✅ Log important events for debugging
+                if event_type in ['session.created', 'session.updated', 'response.created', 
+                                'response.done', 'error']:
+                    print(f"[{call_sid}] OpenAI event: {event_type}")
+                    
+                    if event_type == 'error':
+                        error_message = data.get('error', {})
+                        print(f"[{call_sid}] OpenAI Error: {error_message}")
+
+                # ✅ Customer finished speaking - transcription ready
                 if event_type == 'conversation.item.input_audio_transcription.completed':
                     transcript = data.get('transcript', '').strip()
-
+                    
                     if transcript:
                         print(f"[{call_sid}] Customer said: {transcript}")
-
+                        
                         # Send to workflow, get response
                         response_text = await self.workflow_client.send_message(
                             call_sid,
                             transcript
                         )
-
+                        
+                        print(f"[{call_sid}] Agent responding: {response_text}")
+                        
                         # Tell OpenAI Realtime to speak the response
                         await openai_ws.send(json.dumps({
-                            "type": "response.create",
-                            "response": {
-                                "modalities": ["audio"],
-                                "instructions": f"Say this: {response_text}"
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": response_text
+                                    }
+                                ]
                             }
                         }))
+                        
+                        # Trigger response
+                        await openai_ws.send(json.dumps({
+                            "type": "response.create",
+                            "response": {"modalities": ["audio", "text"]}
+                        }))
 
-                # Agent audio output
+                # ✅ Agent audio output (this is what carries the voice)
                 elif event_type == 'response.audio.delta':
-                    # Get audio from OpenAI
-                    pcm_data = decode_base64(data.get('delta', ''))
-
-                    # Convert to mulaw
-                    mulaw_data = pcm16_to_mulaw(pcm_data)
-
-                    # Send to Twilio
+                    if not audio_started:
+                        print(f"[{call_sid}] Started streaming audio to customer")
+                        audio_started = True
+                    
+                    # Get audio chunk (already in g711_ulaw base64 format)
+                    audio_payload = data.get('delta', '')
+                    
+                    if audio_payload:
+                        # Send to Twilio
+                        await twilio_ws.send(json.dumps({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {
+                                "payload": audio_payload
+                            }
+                        }))
+                
+                # ✅ Audio response complete - send mark
+                elif event_type == 'response.audio.done':
+                    print(f"[{call_sid}] Audio response completed")
+                    audio_started = False  # Reset for next response
+                    
+                    mark_id = f"mark_{int(asyncio.get_event_loop().time() * 1000)}"
                     await twilio_ws.send(json.dumps({
-                        "event": "media",
-                        "media": {
-                            "payload": encode_base64(mulaw_data)
+                        "event": "mark",
+                        "streamSid": stream_sid,
+                        "mark": {
+                            "name": mark_id
                         }
                     }))
 
         except Exception as e:
             print(f"[{call_sid}] Agent audio error: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def cleanup(self, call_sid: str):
         """Clean up connections"""

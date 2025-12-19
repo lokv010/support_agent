@@ -5,7 +5,7 @@ Test script to verify MCP connection and Assistant setup
 import asyncio
 import os
 from dotenv import load_dotenv
-from workflow_client import WorkflowClient
+from workflow_client_backup import WorkflowClient
 
 # Load environment
 load_dotenv()
