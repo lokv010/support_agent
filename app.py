@@ -4,10 +4,9 @@ Main Application
 Async web app (Quart) that:
 1. Receives Twilio calls
 2. Opens WebSocket for media stream
-3. Connects voice to workflow
+3. Connects voice to workflow via CRM MCP Server
 """
 
-from flask import logging
 from quart import Quart, request, websocket
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 import json
@@ -30,8 +29,20 @@ voice_handler = VoiceHandler(workflow_client)
 print("=" * 70)
 print("VOICE AGENT SYSTEM STARTED")
 print("=" * 70)
-print("Using OpenAI Agents SDK")
+print("Using OpenAI Agents SDK + CRM MCP Server")
 print("=" * 70)
+
+
+@app.before_serving
+async def startup():
+    """Connect to CRM MCP server on startup."""
+    await workflow_client.connect()
+
+
+@app.after_serving
+async def shutdown():
+    """Disconnect from CRM MCP server on shutdown."""
+    await workflow_client.disconnect()
 
 
 @app.route('/voice', methods=['POST'])
@@ -85,9 +96,9 @@ async def media_stream():
 
 
 @app.route('/health', methods=['GET'])
-def health():
+async def health():
     """Health check"""
-    return {"status": "healthy"}
+    return {"status": "healthy", "crm_mcp_connected": workflow_client._connected}
 
 
 if __name__ == '__main__':
