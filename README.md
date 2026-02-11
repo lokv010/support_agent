@@ -2,8 +2,8 @@
 
 Simple voice AI system connecting:
 - Twilio (phone calls)
-- OpenAI Realtime (voice)
-- OpenAI Agents SDK (brain)
+- Twilio Realtime (voice)
+- OpenAI Assistants  (brain) + custom mcp tools
 
 ## Overview
 
@@ -11,18 +11,18 @@ This system enables natural voice conversations between customers and an AI assi
 - Scheduling service appointments
 - Checking service history
 - Getting appointment availability
-- Any other business logic your Agent handles
+- Any other business logic your Assistant handles
 
 ### Architecture
 
 ```
 Customer speaks
     ↓
-OpenAI Realtime (STT - Speech to Text)
+Twilio
     ↓
-OpenAI Agents SDK (thinks, decides, acts with tools)
+OpenAI Assistant + Custom mcp server (tool calling)
     ↓
-OpenAI Realtime (TTS - Text to Speech)
+Twilio
     ↓
 Customer hears
 ```
@@ -44,7 +44,6 @@ This is a **simple voice interface** to your OpenAI Agent. It:
 - ❌ Tool execution (your agent handles this with tools)
 - ❌ Database operations (your agent calls tools for this)
 
-**Total: ~300 lines of code**
 
 ---
 
@@ -260,6 +259,18 @@ The OpenAI Agents SDK handles the rest. You just connect voice to it.
 - Check if tools are properly configured (if using any)
 
 ---
+
+## Letency
+- cache common responses
+- keep the tools ready/loaded
+- input the twilio stt to assistant while customer is speaking (async)
+
+## Tools
+- add_customer_record
+- add_customer_record
+- event_type_available_times
+- create_event
+- twilio send whatsapp message (later)
 
 ## License
 

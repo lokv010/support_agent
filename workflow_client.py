@@ -13,6 +13,11 @@ NO audio handling - pure text processing
 from agents import Agent, Runner, SQLiteSession
 import os
 import asyncio
+import aiohttp
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+from openai import http_client
 
 
 class WorkflowClient:
@@ -35,7 +40,7 @@ Book car service appointments efficiently over the phone.
 - Maximum 20 words per response
 - ONE question at a time
 - Natural conversational speech
-- No formatting, bullets, or lists
+- No formatting, bullets, or lists or emojis
 
 # CONVERSATION FLOW
 
@@ -84,7 +89,8 @@ Book car service appointments efficiently over the phone.
 - Use natural phone speech""",
             # Tools will be added here if Zapier MCP is connected
             # For now, agent works without tools for testing
-            tools=[]
+            tools=[],
+            model="gpt-3.5-turbo"
         )
 
         # Track sessions per call
@@ -93,35 +99,29 @@ Book car service appointments efficiently over the phone.
         print("Workflow Client initialized")
         print("- Architecture: Twilio Native")
         print("- Using: OpenAI Assistants API")
-        
         # Try to load Zapier MCP tools
         self._load_mcp_tools()
 
     def _load_mcp_tools(self):
         """
-        Load Zapier MCP tools if available
+        Load Custom MCP tools from localhost:3100
         This is called synchronously, so we schedule async initialization
         """
         try:
-            # Check if MCP secret is set
-            mcp_secret = os.getenv('ZAPIER_MCP_SECRET')
+            # Check if custom MCP server is available
+            # No secret needed for localhost server
             
-            if not mcp_secret:
-                print("- Tools: No ZAPIER_MCP_SECRET found in environment")
-                print("- Set ZAPIER_MCP_SECRET=your-secret in .env file")
-                return
-            
-            # Schedule async MCP initialization
-            print("- Tools: Zapier MCP secret found, will connect on first use")
+            print("- Tools: Custom MCP server at http://localhost:3100/mcp")
+            print("- Tools: Will connect on first use")
             self.mcp_enabled = True
             
         except Exception as e:
             print(f"- Tools: Error checking MCP: {e}")
             self.mcp_enabled = False
-    
+        
     async def _initialize_mcp(self):
         """
-        Initialize MCP connection (async)
+        Initialize MCP connection using HTTP JSON-RPC
         Called once on first message
         """
         if hasattr(self, '_mcp_initialized'):
@@ -130,61 +130,96 @@ Book car service appointments efficiently over the phone.
         self._mcp_initialized = True
         
         try:
-            print("Initializing Zapier MCP connection...")
+            print("Initializing Custom MCP connection...")
             
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
+            import aiohttp
             
-            mcp_secret = os.getenv('ZAPIER_MCP_SECRET')
+            # Your MCP server URL
+            mcp_url = "http://localhost:3100/mcp"
             
-            # Create server parameters for Zapier MCP
-            server_params = StdioServerParameters(
-                command="npx",
-                args=["-y", "@modelcontextprotocol/server-everything"],
-                env={
-                    "ZAPIER_MCP_SECRET": mcp_secret
-                }
-            )
-            
-            # Connect to MCP server
-            mcp_client = stdio_client(server_params)
-            read, write = await mcp_client.__aenter__()
-            
-            # Create session
-            self.mcp_session = ClientSession(read, write)
-            await self.mcp_session.initialize()
-            
-            # List available tools
-            tools_list = await self.mcp_session.list_tools()
-            
-            print(f"✓ Connected to Zapier MCP: {len(tools_list.tools)} tools available")
-            
-            # Store tools
-            self.mcp_tools = tools_list.tools
-            
-            # Log tool names
-            for tool in self.mcp_tools[:5]:  # Show first 5
-                print(f"  - {tool.name}")
-            
-            if len(self.mcp_tools) > 5:
-                print(f"  ... and {len(self.mcp_tools) - 5} more")
-            
-            # Update agent with MCP tools
-            # Note: You may need to create wrapper functions for each tool
-            # For now, tools are available via self.mcp_tools
-            
-            return True
-            
+            # Test connection and list tools
+            async with aiohttp.ClientSession() as session:
+                # Send tools/list request
+                async with session.post(
+                    mcp_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/list"
+                    },
+                    headers={"Content-Type": "application/json"}
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Extract tools from response
+                        tools_data = data.get('result', {}).get('tools', [])
+                        
+                        print(f"✓ Connected to Custom MCP: {len(tools_data)} tools available")
+                        
+                        # Store tools
+                        self.mcp_tools = tools_data
+                        self.mcp_url = mcp_url  # Store URL for future calls
+                        
+                        # Log tool names
+                        for tool in tools_data[:5]:
+                            print(f"  - {tool.get('name', 'unknown')}")
+                        
+                        if len(tools_data) > 5:
+                            print(f"  ... and {len(tools_data) - 5} more")
+                        
+                        return True
+                    else:
+                        print(f"✗ MCP server returned status {response.status}")
+                        return False
+                
         except ImportError:
-            print("✗ MCP library not installed")
-            print("  Run: pip install mcp")
+            print("✗ aiohttp not installed")
+            print("  Run: pip install aiohttp")
             return False
         except Exception as e:
-            print(f"✗ Error connecting to Zapier MCP: {e}")
+            print(f"✗ Error connecting to Custom MCP: {e}")
             import traceback
             traceback.print_exc()
             return False
+    
 
+    async def _call_mcp_tool(self, tool_name: str, arguments: dict):
+        """
+        Call an MCP tool via HTTP JSON-RPC
+        """
+        if not hasattr(self, 'mcp_url'):
+            return None
+        
+        try:
+            import aiohttp
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.mcp_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": tool_name,
+                            "arguments": arguments
+                        }
+                    },
+                    headers={"Content-Type": "application/json"}
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get('result')
+                    else:
+                        print(f"MCP tool call failed: {response.status}")
+                        return None
+                        
+        except Exception as e:
+            print(f"Error calling MCP tool {tool_name}: {e}")
+        return None
+    
+    
     async def create_thread(self, call_sid: str) -> str:
         """
         Create conversation session for this call

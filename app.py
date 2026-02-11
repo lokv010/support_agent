@@ -68,7 +68,7 @@ async def voice_webhook():
             action='/process-speech',
             method='POST',
             timeout=10,
-            speech_timeout=2,  # Pause after customer stops speaking
+            speech_timeout=1,  # Pause after customer stops speaking
             language='en-US',
             enhanced=True,
             speech_model='phone_call'
@@ -140,7 +140,7 @@ async def process_speech():
                 action='/process-speech',
                 method='POST',
                 timeout=10,
-                speech_timeout=2
+                speech_timeout=1
             )
             gather.say(
                 "Sorry, I didn't catch that. Could you repeat?",
@@ -183,7 +183,7 @@ async def process_speech():
             action='/process-speech',
             method='POST',
             timeout=10,
-            speech_timeout=2,
+            speech_timeout=1,
             language='en-US',
             enhanced=True,
             speech_model='phone_call'
