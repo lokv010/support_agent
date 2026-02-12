@@ -16,17 +16,26 @@ import asyncio
 import aiohttp
 from mcp import ClientSession
 from mcp.client.sse import sse_client
-
 from openai import http_client
+from agents import Agent, Runner, SQLiteSession
+from agents.mcp import MCPServerStreamableHttp
 
+CRM_MCP_URL = os.getenv("CRM_MCP_URL", "http://localhost:3100/mcp")
 
 class WorkflowClient:
     def __init__(self):
         """
         Initialize Assistants API client with Zapier MCP tools
         """
-        self.mcp_session = None
-        self.mcp_tools = []
+        self.crm_server = MCPServerStreamableHttp(
+            name="CRM MCP Server",
+            params={
+                "url": CRM_MCP_URL,
+                "timeout": 30,
+            },
+            cache_tools_list=True,
+        )
+       
         
         # Define your agent
         self.agent = Agent(
@@ -95,131 +104,29 @@ Book car service appointments efficiently over the phone.
 
         # Track sessions per call
         self.sessions = {}  # call_sid → InMemorySession
+        self._connected = False
 
         print("Workflow Client initialized")
         print("- Architecture: Twilio Native")
         print("- Using: OpenAI Assistants API")
         # Try to load Zapier MCP tools
-        self._load_mcp_tools()
+        # self._load_mcp_tools()
 
-    def _load_mcp_tools(self):
-        """
-        Load Custom MCP tools from localhost:3100
-        This is called synchronously, so we schedule async initialization
-        """
-        try:
-            # Check if custom MCP server is available
-            # No secret needed for localhost server
-            
-            print("- Tools: Custom MCP server at http://localhost:3100/mcp")
-            print("- Tools: Will connect on first use")
-            self.mcp_enabled = True
-            
-        except Exception as e:
-            print(f"- Tools: Error checking MCP: {e}")
-            self.mcp_enabled = False
-        
-    async def _initialize_mcp(self):
-        """
-        Initialize MCP connection using HTTP JSON-RPC
-        Called once on first message
-        """
-        if hasattr(self, '_mcp_initialized'):
-            return
-        
-        self._mcp_initialized = True
-        
-        try:
-            print("Initializing Custom MCP connection...")
-            
-            import aiohttp
-            
-            # Your MCP server URL
-            mcp_url = "http://localhost:3100/mcp"
-            
-            # Test connection and list tools
-            async with aiohttp.ClientSession() as session:
-                # Send tools/list request
-                async with session.post(
-                    mcp_url,
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/list"
-                    },
-                    headers={"Content-Type": "application/json"}
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        
-                        # Extract tools from response
-                        tools_data = data.get('result', {}).get('tools', [])
-                        
-                        print(f"✓ Connected to Custom MCP: {len(tools_data)} tools available")
-                        
-                        # Store tools
-                        self.mcp_tools = tools_data
-                        self.mcp_url = mcp_url  # Store URL for future calls
-                        
-                        # Log tool names
-                        for tool in tools_data[:5]:
-                            print(f"  - {tool.get('name', 'unknown')}")
-                        
-                        if len(tools_data) > 5:
-                            print(f"  ... and {len(tools_data) - 5} more")
-                        
-                        return True
-                    else:
-                        print(f"✗ MCP server returned status {response.status}")
-                        return False
-                
-        except ImportError:
-            print("✗ aiohttp not installed")
-            print("  Run: pip install aiohttp")
-            return False
-        except Exception as e:
-            print(f"✗ Error connecting to Custom MCP: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
+    async def connect(self):
+        """Connect to the CRM MCP server."""
+        if not self._connected:
+            await self.crm_server.__aenter__()
+            self._connected = True
+            print(f"[WorkflowClient] Connected to CRM MCP at {CRM_MCP_URL}")
 
-    async def _call_mcp_tool(self, tool_name: str, arguments: dict):
-        """
-        Call an MCP tool via HTTP JSON-RPC
-        """
-        if not hasattr(self, 'mcp_url'):
-            return None
-        
-        try:
-            import aiohttp
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.mcp_url,
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "tools/call",
-                        "params": {
-                            "name": tool_name,
-                            "arguments": arguments
-                        }
-                    },
-                    headers={"Content-Type": "application/json"}
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get('result')
-                    else:
-                        print(f"MCP tool call failed: {response.status}")
-                        return None
-                        
-        except Exception as e:
-            print(f"Error calling MCP tool {tool_name}: {e}")
-        return None
-    
-    
+    async def disconnect(self):
+        """Disconnect from the CRM MCP server."""
+        if self._connected:
+            await self.crm_server.__aexit__(None, None, None)
+            self._connected = False
+            print("[WorkflowClient] Disconnected from CRM MCP")
+
+
     async def create_thread(self, call_sid: str) -> str:
         """
         Create conversation session for this call
@@ -230,7 +137,7 @@ Book car service appointments efficiently over the phone.
         Returns:
             session_id (same as call_sid)
         """
-        session = SQLiteSession(session_id=call_sid)
+        session = SQLiteSession(db_path=":memory:", session_id=call_sid)
         self.sessions[call_sid] = session
         print(f"[{call_sid}] Created session")
         return call_sid
@@ -241,7 +148,7 @@ Book car service appointments efficiently over the phone.
 
         This is where the conversational AI happens:
         - Agent understands intent
-        - Agent can call tools (if configured)
+        - Agent calls CRM MCP tools (customer lookup, scheduling, email)
         - Agent generates appropriate response
 
         Args:
