@@ -24,39 +24,48 @@ MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:3100/mcp")
 
 async def _mcp_call(tool_name: str, arguments: dict) -> str:
     """Call a CRM MCP server tool via HTTP JSON-RPC."""
+    import json as _json
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+        },
+    }
+    print(f"[MCP_CALL] → {tool_name} | URL: {MCP_SERVER_URL}")
+    print(f"[MCP_CALL] → Payload: {_json.dumps(payload, indent=2)}")
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 MCP_SERVER_URL,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": arguments,
-                    },
-                },
+                json=payload,
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json, text/event-stream",
                 },
             ) as response:
+                print(f"[MCP_CALL] ← Status: {response.status}, Content-Type: {response.headers.get('Content-Type', 'N/A')}")
                 if response.status == 200:
                     content_type = response.headers.get("Content-Type", "")
                     if "text/event-stream" in content_type:
                         # Parse SSE response: look for "data:" lines with JSON
                         body = await response.text()
+                        print(f"[MCP_CALL] ← SSE body: {body[:500]}")
                         for line in body.splitlines():
                             if line.startswith("data:"):
                                 json_str = line[len("data:"):].strip()
                                 if json_str:
-                                    import json
-                                    data = json.loads(json_str)
+                                    data = _json.loads(json_str)
                                     result = data.get("result", {})
                                     content = result.get("content", [])
                                     if content:
-                                        return content[0].get("text", str(result))
+                                        text = content[0].get("text", str(result))
+                                        print(f"[MCP_CALL] ← SSE result: {text[:300]}")
+                                        return text
                                     return str(result)
                         return f"Error: No data in SSE response from MCP server"
                     else:
@@ -64,12 +73,19 @@ async def _mcp_call(tool_name: str, arguments: dict) -> str:
                         result = data.get("result", {})
                         content = result.get("content", [])
                         if content:
-                            return content[0].get("text", str(result))
+                            text = content[0].get("text", str(result))
+                            print(f"[MCP_CALL] ← JSON result: {text[:300]}")
+                            return text
+                        print(f"[MCP_CALL] ← No content in result: {_json.dumps(data)[:300]}")
                         return str(result)
                 else:
                     body = await response.text()
+                    print(f"[MCP_CALL] ← ERROR status {response.status}: {body[:500]}")
                     return f"Error: MCP server returned status {response.status}: {body}"
     except Exception as e:
+        print(f"[MCP_CALL] ← EXCEPTION: {tool_name}: {e}")
+        import traceback
+        traceback.print_exc()
         return f"Error calling MCP tool {tool_name}: {e}"
 
 
