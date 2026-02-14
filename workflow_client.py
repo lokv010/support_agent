@@ -37,15 +37,35 @@ async def _mcp_call(tool_name: str, arguments: dict) -> str:
                         "arguments": arguments,
                     },
                 },
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
             ) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    result = data.get("result", {})
-                    content = result.get("content", [])
-                    if content:
-                        return content[0].get("text", str(result))
-                    return str(result)
+                    content_type = response.headers.get("Content-Type", "")
+                    if "text/event-stream" in content_type:
+                        # Parse SSE response: look for "data:" lines with JSON
+                        body = await response.text()
+                        for line in body.splitlines():
+                            if line.startswith("data:"):
+                                json_str = line[len("data:"):].strip()
+                                if json_str:
+                                    import json
+                                    data = json.loads(json_str)
+                                    result = data.get("result", {})
+                                    content = result.get("content", [])
+                                    if content:
+                                        return content[0].get("text", str(result))
+                                    return str(result)
+                        return f"Error: No data in SSE response from MCP server"
+                    else:
+                        data = await response.json()
+                        result = data.get("result", {})
+                        content = result.get("content", [])
+                        if content:
+                            return content[0].get("text", str(result))
+                        return str(result)
                 else:
                     body = await response.text()
                     return f"Error: MCP server returned status {response.status}: {body}"
