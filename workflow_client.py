@@ -10,6 +10,7 @@ Works with Twilio Native architecture:
 NO audio handling - pure text processing
 """
 
+import string
 from agents import Agent, Runner, SQLiteSession, function_tool
 import os
 import asyncio
@@ -64,6 +65,9 @@ async def check_customer_history(phone_number: str) -> str:
 
 @function_tool
 async def add_customer_record(
+    make: str,
+    model: str,
+    kilometers: str,
     name: str,
     email: str,
     phone: str = "",
@@ -74,11 +78,15 @@ async def add_customer_record(
 ) -> str:
     """Add a new customer record to the CRM. Use this for new customers after getting their name and email."""
     args: dict = {
+        "make": make,
+        "model": model,
+        "km": kilometers,
         "name": name,
         "email": email,
         "issue": issue,
         "status": status,
         "priority": priority,
+        "notes": notes,
     }
     if phone:
         args["phone"] = phone
@@ -97,36 +105,34 @@ async def get_service_pricing(service_type: str, vehicle_type: str) -> str:
 
 
 @function_tool
-async def event_type_available_times(event_type_uri: str, reference_date: str = "") -> str:
+async def check_availability(event_type_uri: str, start_time: str = "", end_time: str = "") -> str:
     """Get available appointment time slots for the week containing the reference date. Call when the customer wants to schedule."""
     args: dict = {"eventTypeUri": event_type_uri}
-    if reference_date:
-        args["referenceDate"] = reference_date
-    return await _mcp_call("event_type_available_times", args)
+    if start_time:
+        args["startTime"] = start_time
+    if end_time:
+        args["endTime"] = end_time
+    return await _mcp_call("check_availability", args)
 
 
 @function_tool
-async def create_appointment(
-    event_type_uri: str,
-    customer_name: str,
-    customer_email: str,
-    customer_phone: str = "",
-    preferred_date: str = "",
-    notes: str = "",
+async def create_event(
+  eventTypeUri: str,
+    customerName: str,
+    customerEmail: str,
+    customerPhone: str,
+    preferredDate: str
 ) -> str:
     """Create an appointment booking for the customer. Only call this after explicit customer confirmation."""
     args: dict = {
-        "eventTypeUri": event_type_uri,
-        "customerName": customer_name,
-        "customerEmail": customer_email,
+        "eventTypeUri": eventTypeUri,
+        "customerName": customerName,
+        "customerEmail": customerEmail,
+        "customerPhone": customerPhone,
+        "preferredDate": preferredDate
     }
-    if customer_phone:
-        args["customerPhone"] = customer_phone
-    if preferred_date:
-        args["preferredDate"] = preferred_date
-    if notes:
-        args["notes"] = notes
-    return await _mcp_call("create_appointment", args)
+
+    return await _mcp_call("create_event", args)
 
 
 # ---------------------------------------------------------------------------
@@ -173,21 +179,21 @@ Book car service appointments efficiently over the phone.
 
 5. SCHEDULE
    "When would you like to come in?"
-   → Call event_type_available_times tool
+   → Call check_availability tool
    → Show 2-3 options: "I have 2 PM and 4 PM. Which works?"
 
 6. CONFIRM & BOOK
    Read back: "[Name], [service], [vehicle], [date] at [time], $[price]. Correct?"
    Wait for "yes"
-   → Call create_appointment tool
+   → Call create_event tool
    "All set! You're booked. Confirmation sent."
 
 # TOOL USAGE
 - check_customer_history: Call immediately when you get phone number
 - add_customer_record: Only for new customers after getting name and email
 - get_service_pricing: Never guess prices, always call this
-- event_type_available_times: When customer wants to schedule
-- create_appointment: Only after explicit confirmation
+- check_availability: When customer wants to schedule
+- create_event: Only after explicit confirmation
 
 # CRITICAL RULES
 - NEVER make up prices
@@ -199,8 +205,8 @@ Book car service appointments efficiently over the phone.
                 check_customer_history,
                 add_customer_record,
                 get_service_pricing,
-                event_type_available_times,
-                create_appointment,
+                check_availability,
+                create_event,
             ],
             model="gpt-4o-mini",
         )
