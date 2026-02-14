@@ -21,10 +21,93 @@ import aiohttp
 # ---------------------------------------------------------------------------
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:3100/mcp")
 
+# ---------------------------------------------------------------------------
+# MCP Session Management
+# ---------------------------------------------------------------------------
+# The MCP protocol requires an `initialize` handshake before `tools/call`.
+# We cache the session ID so subsequent calls reuse the same session.
+_mcp_session_id: str | None = None
+_mcp_session_lock = asyncio.Lock()
+
+
+async def _mcp_ensure_initialized() -> str | None:
+    """Send an MCP initialize handshake if we haven't already.
+
+    Returns the Mcp-Session-Id from the server (or None if the server
+    doesn't require one).
+    """
+    global _mcp_session_id
+    if _mcp_session_id is not None:
+        return _mcp_session_id
+
+    async with _mcp_session_lock:
+        # Double-check after acquiring lock
+        if _mcp_session_id is not None:
+            return _mcp_session_id
+
+        import json as _json
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "support-agent", "version": "1.0.0"},
+            },
+        }
+        print(f"[MCP_INIT] → Sending initialize to {MCP_SERVER_URL}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    MCP_SERVER_URL,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                    },
+                ) as response:
+                    sid = response.headers.get("Mcp-Session-Id") or response.headers.get("mcp-session-id")
+                    print(f"[MCP_INIT] ← Status: {response.status}, Mcp-Session-Id: {sid}")
+                    if response.status == 200:
+                        _mcp_session_id = sid or ""
+                        # Send initialized notification per MCP spec
+                        if _mcp_session_id:
+                            notif = {
+                                "jsonrpc": "2.0",
+                                "method": "notifications/initialized",
+                            }
+                            async with session.post(
+                                MCP_SERVER_URL,
+                                json=notif,
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Accept": "application/json, text/event-stream",
+                                    "Mcp-Session-Id": _mcp_session_id,
+                                },
+                            ) as _:
+                                pass
+                        return _mcp_session_id
+                    else:
+                        body = await response.text()
+                        print(f"[MCP_INIT] ← ERROR: {body[:500]}")
+                        # Allow calls to proceed without session; server may
+                        # handle tools/call at Express level without init.
+                        _mcp_session_id = ""
+                        return _mcp_session_id
+        except Exception as e:
+            print(f"[MCP_INIT] ← EXCEPTION: {e}")
+            _mcp_session_id = ""
+            return _mcp_session_id
+
 
 async def _mcp_call(tool_name: str, arguments: dict) -> str:
     """Call a CRM MCP server tool via HTTP JSON-RPC."""
     import json as _json
+
+    # Ensure MCP session is initialized before making tool calls
+    session_id = await _mcp_ensure_initialized()
 
     payload = {
         "jsonrpc": "2.0",
@@ -35,6 +118,13 @@ async def _mcp_call(tool_name: str, arguments: dict) -> str:
             "arguments": arguments,
         },
     }
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+
     print(f"[MCP_CALL] → {tool_name} | URL: {MCP_SERVER_URL}")
     print(f"[MCP_CALL] → Payload: {_json.dumps(payload, indent=2)}")
 
@@ -43,10 +133,7 @@ async def _mcp_call(tool_name: str, arguments: dict) -> str:
             async with session.post(
                 MCP_SERVER_URL,
                 json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
+                headers=headers,
             ) as response:
                 print(f"[MCP_CALL] ← Status: {response.status}, Content-Type: {response.headers.get('Content-Type', 'N/A')}")
                 if response.status == 200:
@@ -78,6 +165,16 @@ async def _mcp_call(tool_name: str, arguments: dict) -> str:
                             return text
                         print(f"[MCP_CALL] ← No content in result: {_json.dumps(data)[:300]}")
                         return str(result)
+                elif response.status == 400:
+                    body = await response.text()
+                    # If session expired/invalid, reset and retry once
+                    if "not initialized" in body.lower() and session_id:
+                        print(f"[MCP_CALL] ← Session expired, re-initializing...")
+                        global _mcp_session_id
+                        _mcp_session_id = None
+                        return await _mcp_call(tool_name, arguments)
+                    print(f"[MCP_CALL] ← ERROR status {response.status}: {body[:500]}")
+                    return f"Error: MCP server returned status {response.status}: {body}"
                 else:
                     body = await response.text()
                     print(f"[MCP_CALL] ← ERROR status {response.status}: {body[:500]}")
