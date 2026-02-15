@@ -10,40 +10,289 @@ Works with Twilio Native architecture:
 NO audio handling - pure text processing
 """
 
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner, SQLiteSession, function_tool
 import os
 import asyncio
 import aiohttp
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from openai import http_client
-from agents import Agent, Runner, SQLiteSession
-from agents.mcp import MCPServerStreamableHttp
 
-CRM_MCP_URL = os.getenv("CRM_MCP_URL", "http://localhost:3100/mcp")
+# ---------------------------------------------------------------------------
+# MCP Server Configuration
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# MCP Server Configuration
+# ---------------------------------------------------------------------------
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:3100/mcp")
+
+# ---------------------------------------------------------------------------
+# MCP Session Management
+# ---------------------------------------------------------------------------
+# The MCP protocol requires an `initialize` handshake before `tools/call`.
+# We cache the session ID so subsequent calls reuse the same session.
+_mcp_session_id: str | None = None
+_mcp_session_lock = asyncio.Lock()
+
+
+async def _mcp_ensure_initialized() -> str | None:
+    """Send an MCP initialize handshake if we haven't already.
+
+    Returns the Mcp-Session-Id from the server (or None if the server
+    doesn't require one).
+    """
+    global _mcp_session_id
+    if _mcp_session_id is not None:
+        return _mcp_session_id
+
+    async with _mcp_session_lock:
+        # Double-check after acquiring lock
+        if _mcp_session_id is not None:
+            return _mcp_session_id
+
+        import json as _json
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "support-agent", "version": "1.0.0"},
+            },
+        }
+        print(f"[MCP_INIT] → Sending initialize to {MCP_SERVER_URL}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    MCP_SERVER_URL,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                    },
+                ) as response:
+                    sid = response.headers.get("Mcp-Session-Id") or response.headers.get("mcp-session-id")
+                    print(f"[MCP_INIT] ← Status: {response.status}, Mcp-Session-Id: {sid}")
+                    if response.status == 200:
+                        _mcp_session_id = sid or ""
+                        # Send initialized notification per MCP spec
+                        if _mcp_session_id:
+                            notif = {
+                                "jsonrpc": "2.0",
+                                "method": "notifications/initialized",
+                            }
+                            async with session.post(
+                                MCP_SERVER_URL,
+                                json=notif,
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Accept": "application/json, text/event-stream",
+                                    "Mcp-Session-Id": _mcp_session_id,
+                                },
+                            ) as _:
+                                pass
+                        return _mcp_session_id
+                    else:
+                        body = await response.text()
+                        print(f"[MCP_INIT] ← ERROR: {body[:500]}")
+                        # Allow calls to proceed without session; server may
+                        # handle tools/call at Express level without init.
+                        _mcp_session_id = ""
+                        return _mcp_session_id
+        except Exception as e:
+            print(f"[MCP_INIT] ← EXCEPTION: {e}")
+            _mcp_session_id = ""
+            return _mcp_session_id
+
+
+async def _mcp_call(tool_name: str, arguments: dict) -> str:
+    """Call a CRM MCP server tool via HTTP JSON-RPC."""
+    import json as _json
+
+    # Ensure MCP session is initialized before making tool calls
+    session_id = await _mcp_ensure_initialized()
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+        },
+    }
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+
+    print(f"[MCP_CALL] → {tool_name} | URL: {MCP_SERVER_URL}")
+    print(f"[MCP_CALL] → Payload: {_json.dumps(payload, indent=2)}")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                MCP_SERVER_URL,
+                json=payload,
+                headers=headers,
+            ) as response:
+                print(f"[MCP_CALL] ← Status: {response.status}, Content-Type: {response.headers.get('Content-Type', 'N/A')}")
+                if response.status == 200:
+                    content_type = response.headers.get("Content-Type", "")
+                    if "text/event-stream" in content_type:
+                        # Parse SSE response: look for "data:" lines with JSON
+                        body = await response.text()
+                        print(f"[MCP_CALL] ← SSE body: {body[:500]}")
+                        for line in body.splitlines():
+                            if line.startswith("data:"):
+                                json_str = line[len("data:"):].strip()
+                                if json_str:
+                                    data = _json.loads(json_str)
+                                    result = data.get("result", {})
+                                    content = result.get("content", [])
+                                    if content:
+                                        text = content[0].get("text", str(result))
+                                        print(f"[MCP_CALL] ← SSE result: {text[:300]}")
+                                        return text
+                                    return str(result)
+                        return f"Error: No data in SSE response from MCP server"
+                    else:
+                        data = await response.json()
+                        result = data.get("result", {})
+                        content = result.get("content", [])
+                        if content:
+                            text = content[0].get("text", str(result))
+                            print(f"[MCP_CALL] ← JSON result: {text[:300]}")
+                            return text
+                        print(f"[MCP_CALL] ← No content in result: {_json.dumps(data)[:300]}")
+                        return str(result)
+                elif response.status == 400:
+                    body = await response.text()
+                    # If session expired/invalid, reset and retry once
+                    if "not initialized" in body.lower() and session_id:
+                        print(f"[MCP_CALL] ← Session expired, re-initializing...")
+                        global _mcp_session_id
+                        _mcp_session_id = None
+                        return await _mcp_call(tool_name, arguments)
+                    print(f"[MCP_CALL] ← ERROR status {response.status}: {body[:500]}")
+                    return f"Error: MCP server returned status {response.status}: {body}"
+                else:
+                    body = await response.text()
+                    print(f"[MCP_CALL] ← ERROR status {response.status}: {body[:500]}")
+                    return f"Error: MCP server returned status {response.status}: {body}"
+    except Exception as e:
+        print(f"[MCP_CALL] ← EXCEPTION: {tool_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"Error calling MCP tool {tool_name}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Function Tools — each wraps an MCP server call
+# ---------------------------------------------------------------------------
+
+@function_tool
+async def check_customer_history(phone_number: str) -> str:
+    """Check customer history by phone number. Call this immediately when you get the customer's phone number."""
+    return await _mcp_call("check_customer_history", {"phone_number": phone_number})
+
+
+@function_tool
+async def add_customer_record(
+    make: str,
+    model: str,
+    kilometers: str,
+    name: str,
+    email: str,
+    phone: str = "",
+    issue: str = "New customer inquiry",
+    status: str = "open",
+    priority: str = "medium",
+    notes: str = "",
+) -> str:
+    """Add a new customer record to the CRM. Use this for new customers after getting their name and email."""
+    args: dict = {
+        "make": make,
+        "model": model,
+        "km": kilometers,
+        "name": name,
+        "email": email,
+        "issue": issue,
+        "status": status,
+        "priority": priority,
+        "notes": notes,
+    }
+    if phone:
+        args["phone"] = phone
+    if notes:
+        args["notes"] = notes
+    return await _mcp_call("add_customer_record", args)
+
+
+@function_tool
+async def get_service_pricing(service_type: str, vehicle_type: str) -> str:
+    """Get pricing for a car service. Never guess prices — always call this tool. Common services: oil change, full service, brake service, tire rotation, engine diagnostic, transmission service, ac service, battery replacement."""
+    return await _mcp_call("get_service_pricing", {
+        "service_type": service_type,
+        "vehicle_type": vehicle_type,
+    })
+
+
+@function_tool
+async def check_availability(event_type_uri: str, start_time: str = "", end_time: str = "") -> str:
+    """Get available appointment time slots for the week containing the reference date. Call when the customer wants to schedule."""
+    args: dict = {"eventTypeUri": 'https://api.calendly.com/event_types/3b49691f-afd5-4c92-8042-e39ad9f76827'}
+    if start_time:
+        args["startTime"] = start_time
+    if end_time:
+        args["endTime"] = end_time
+    return await _mcp_call("check_availability", args)
+
+
+@function_tool
+async def create_event(
+  eventTypeUri: str,
+    customerName: str,
+    customerEmail: str,
+    customerPhone: str,
+    preferredDate: str
+) -> str:
+    """Create an appointment booking for the customer. Only call this after explicit customer confirmation."""
+    args: dict = {
+        "eventTypeUri": 'https://api.calendly.com/event_types/3b49691f-afd5-4c92-8042-e39ad9f76827',
+        "customerName": customerName,
+        "customerEmail": customerEmail,
+        "customerPhone": customerPhone,
+        "preferredDate": preferredDate
+    }
+
+    return await _mcp_call("create_event", args)
+
+
+# ---------------------------------------------------------------------------
+# Workflow Client
+# ---------------------------------------------------------------------------
 
 class WorkflowClient:
     def __init__(self):
         """
         Initialize Assistants API client with Zapier MCP tools
         """
-        self.crm_server = MCPServerStreamableHttp(
-            name="CRM MCP Server",
-            params={
-                "url": CRM_MCP_URL,
-                "timeout": 30,
-            },
-            cache_tools_list=True,
-        )
-       
         
         # Define your agent
         self.agent = Agent(
             name="Elite Auto Service Assistant",
-            instructions="""You are Sarah, a professional phone support agent for Elite Auto Service Center.
+            instructions="""You are Sarah, a friendly customer support agent for Elite Auto Service Center.
+
+PERSONALITY:
+- Warm but efficient
+- Concise (1-2 sentences when possible)
+- Never robotic or overly formal
+- Keep conversations focused and helpful
 
 # YOUR ROLE
-Book car service appointments efficiently over the phone.
+Help customers schedule appointments and resolve issues efficiently over the phone.
 
 # CRITICAL PHONE RULES
 - Maximum 20 words per response
@@ -63,18 +312,21 @@ Book car service appointments efficiently over the phone.
 
 3. HANDLE CUSTOMER LOOKUP
    - If found: "Hi [name]! What service do you need?"
-   - If not found: "What's your name?" then "And your email?"
+   - If not found add customer record: "Collect details (make, model, km, name, email) and call add_customer_record tool"
    → Call add_customer_record tool
 
 4. GET SERVICE DETAILS
-   "What service do you need?" (oil change, full service, etc.)
+   "What service do you need?"
    "What type of vehicle?" (sedan, SUV, truck)
    → Call get_service_pricing tool
    → Quote: "[Service] for [vehicle] is $[price]"
 
 5. SCHEDULE
    "When would you like to come in?"
-   → Call event_type_available_times tool
+   -> If they give a date, call check_availability with that date as reference
+   -> If they say "this week" or similar, call check_availability with current week as reference and consider start_time as 9 AM of current day and end_time as 6 PM of the last day of the week
+   -> If they say "next week" or similar, call check_availability with next week as reference and consider start_time as 9 AM of the first day of the week and end_time as 6 PM of the last day of the week
+   → Call check_availability tool
    → Show 2-3 options: "I have 2 PM and 4 PM. Which works?"
 
 6. CONFIRM & BOOK
@@ -96,36 +348,23 @@ Book car service appointments efficiently over the phone.
 - ALWAYS keep responses under 20 words
 - ONE question per response
 - Use natural phone speech""",
-            # Tools will be added here if Zapier MCP is connected
-            # For now, agent works without tools for testing
-            tools=[],
-            model="gpt-3.5-turbo"
+            tools=[
+                check_customer_history,
+                add_customer_record,
+                get_service_pricing,
+                check_availability,
+                create_event,
+            ],
+            model="gpt-4o-mini"
         )
 
         # Track sessions per call
         self.sessions = {}  # call_sid → InMemorySession
-        self._connected = False
-
         print("Workflow Client initialized")
         print("- Architecture: Twilio Native")
         print("- Using: OpenAI Assistants API")
         # Try to load Zapier MCP tools
         # self._load_mcp_tools()
-
-    async def connect(self):
-        """Connect to the CRM MCP server."""
-        if not self._connected:
-            await self.crm_server.__aenter__()
-            self._connected = True
-            print(f"[WorkflowClient] Connected to CRM MCP at {CRM_MCP_URL}")
-
-    async def disconnect(self):
-        """Disconnect from the CRM MCP server."""
-        if self._connected:
-            await self.crm_server.__aexit__(None, None, None)
-            self._connected = False
-            print("[WorkflowClient] Disconnected from CRM MCP")
-
 
     async def create_thread(self, call_sid: str) -> str:
         """

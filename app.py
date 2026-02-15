@@ -36,16 +36,6 @@ print("Using: Twilio STT + OpenAI Assistants + Zapier MCP")
 print("=" * 70)
 print("Using OpenAI Agents SDK + CRM MCP Server")
 
-@app.before_serving
-async def startup():
-    """Connect to CRM MCP server on startup."""
-    await workflow_client.connect()
-
-
-@app.after_serving
-async def shutdown():
-    """Disconnect from CRM MCP server on shutdown."""
-    await workflow_client.disconnect()
 
 
 
