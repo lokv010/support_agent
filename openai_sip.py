@@ -572,16 +572,38 @@ async def _handle_incoming_call(payload: dict) -> tuple[dict, int]:
     Extracts call metadata and accepts the call. Returns 200 immediately
     as OpenAI expects a fast response.
 
+    Payload structure::
+
+        {
+          "type": "realtime.call.incoming",
+          "data": {
+            "call_id": "...",
+            "sip_headers": [
+              {"name": "From", "value": "sip:+1234@..."},
+              ...
+            ]
+          }
+        }
+
     Args:
         payload: The full webhook event payload.
 
     Returns:
         Tuple of (response_dict, http_status_code).
     """
-    call_data = payload.get("call", {})
-    call_id = call_data.get("id", "")
-    sip_headers = call_data.get("sip_headers", {})
-    caller_number = call_data.get("caller_number", sip_headers.get("From", "unknown"))
+    data = payload.get("data", {})
+    call_id = data.get("call_id", "")
+
+    # Convert sip_headers from [{name, value}, ...] list to a flat dict
+    raw_sip_headers = data.get("sip_headers", [])
+    sip_headers = {}
+    if isinstance(raw_sip_headers, list):
+        for h in raw_sip_headers:
+            sip_headers[h.get("name", "")] = h.get("value", "")
+    elif isinstance(raw_sip_headers, dict):
+        sip_headers = raw_sip_headers
+
+    caller_number = sip_headers.get("From", "unknown")
 
     print(f"\n{'='*60}")
     print(f"[SIP] INCOMING CALL: {call_id}")
@@ -589,7 +611,11 @@ async def _handle_incoming_call(payload: dict) -> tuple[dict, int]:
     print(f"[SIP] SIP Headers: {json.dumps(sip_headers)[:200]}")
     print(f"{'='*60}\n")
 
-    # Accept the call (runs in background – we return 200 immediately)
+    if not call_id:
+        print("[SIP] ERROR: No call_id in webhook payload")
+        return {"status": "error", "error": "missing call_id"}, 200
+
+    # Accept the call
     try:
         result = await accept_call(call_id, sip_headers)
         return {"status": "accepted", "call_id": call_id, "result": result}, 200
