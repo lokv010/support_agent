@@ -8,6 +8,7 @@ Uses OpenAI Realtime API with SIP trunking:
 - Call lifecycle management (accept, reject, hangup, transfer)
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -41,12 +42,37 @@ _active_calls: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 # 1. verify_webhook_signature
 # ---------------------------------------------------------------------------
+def _get_header(headers: dict, name: str) -> str:
+    """Case-insensitive header lookup.
+
+    Quart/Werkzeug title-cases headers when converted to dict
+    (e.g. ``Webhook-Signature``), but the spec uses lowercase.
+    """
+    # Try exact, then Title-Case, then iterate
+    for key in (name, name.title(), name.upper()):
+        if key in headers:
+            return headers[key]
+    # Fallback: brute-force case-insensitive scan
+    lower = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lower:
+            return value
+    return ""
+
+
 def verify_webhook_signature(headers: dict, body: bytes) -> bool:
     """Validate that the incoming webhook request is genuinely from OpenAI.
 
-    Checks:
-    - ``webhook-signature`` header against the signing secret using HMAC-SHA256
-    - ``webhook-timestamp`` to prevent replay attacks (must be within tolerance)
+    OpenAI uses the `Standard Webhooks <https://www.standardwebhooks.com>`_
+    specification (Svix).  Three headers are required:
+
+    - ``webhook-id``        – unique delivery ID
+    - ``webhook-timestamp`` – Unix epoch seconds
+    - ``webhook-signature`` – ``v1,<base64-HMAC-SHA256>``
+
+    The signed content is ``{webhook_id}.{webhook_timestamp}.{body}``.
+    The signing key is the base64-decoded portion of the secret **after**
+    stripping the ``whsec_`` prefix.
 
     Args:
         headers: Raw request headers (dict-like).
@@ -59,14 +85,18 @@ def verify_webhook_signature(headers: dict, body: bytes) -> bool:
         print("[SIP] WARNING: OPENAI_WEBHOOK_SECRET not set – skipping verification")
         return True
 
-    signature = headers.get("webhook-signature", "")
-    timestamp = headers.get("webhook-timestamp", "")
+    webhook_id = _get_header(headers, "webhook-id")
+    timestamp = _get_header(headers, "webhook-timestamp")
+    signature = _get_header(headers, "webhook-signature")
 
-    if not signature or not timestamp:
-        print("[SIP] Missing webhook-signature or webhook-timestamp header")
+    if not webhook_id or not timestamp or not signature:
+        print(
+            f"[SIP] Missing required webhook headers "
+            f"(id={bool(webhook_id)}, ts={bool(timestamp)}, sig={bool(signature)})"
+        )
         return False
 
-    # Replay attack protection
+    # Replay-attack protection
     try:
         ts = int(timestamp)
         now = int(time.time())
@@ -77,24 +107,35 @@ def verify_webhook_signature(headers: dict, body: bytes) -> bool:
         print("[SIP] Invalid webhook-timestamp value")
         return False
 
-    # Compute expected signature: HMAC-SHA256(secret, "{timestamp}.{body}")
-    signed_payload = f"{timestamp}.".encode() + body
-    expected = hmac.new(
-        OPENAI_WEBHOOK_SECRET.encode(),
-        signed_payload,
-        hashlib.sha256,
-    ).hexdigest()
+    # Derive the signing key: base64-decode the part after "whsec_"
+    secret_str = OPENAI_WEBHOOK_SECRET
+    if secret_str.startswith("whsec_"):
+        secret_str = secret_str[len("whsec_"):]
+    try:
+        secret_bytes = base64.b64decode(secret_str)
+    except Exception:
+        print("[SIP] Failed to base64-decode webhook secret")
+        return False
 
-    # The header may contain multiple signatures (v1=<sig>), iterate all
-    for sig_part in signature.split(","):
+    # Signed content: "{webhook_id}.{timestamp}.{body}"
+    signed_content = f"{webhook_id}.{timestamp}.".encode() + body
+
+    expected_sig = base64.b64encode(
+        hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
+    ).decode()
+
+    # The header may contain space-separated signatures: "v1,<sig1> v1,<sig2>"
+    for sig_part in signature.split(" "):
         sig_part = sig_part.strip()
-        # Strip version prefix if present (e.g. "v1=abc123")
-        if "=" in sig_part:
-            _, _, sig_value = sig_part.partition("=")
+        if not sig_part:
+            continue
+        # Strip version prefix "v1,"
+        if sig_part.startswith("v1,"):
+            sig_value = sig_part[3:]
         else:
             sig_value = sig_part
 
-        if hmac.compare_digest(expected, sig_value):
+        if hmac.compare_digest(expected_sig, sig_value):
             return True
 
     print("[SIP] Webhook signature mismatch")
