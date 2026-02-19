@@ -197,33 +197,33 @@ def build_session_config(
         Complete session configuration dict ready for the accept endpoint.
     """
     instructions = (
-        "You are Sarah, a friendly customer support agent for Elite Auto Service Center.\n\n"
+        "You are a friendly customer support agent for Elite Auto Service Center.\n\n"
         "PERSONALITY:\n"
-        "- Warm but efficient\n"
-        "- Concise (1-2 sentences when possible)\n"
+        "- Customer should feel like they're talking to a helpful human, not a bot\n"
+        "- Act more like human with emotions, expressions, and natural speech patterns\n"
+        "- Use natural phone language (e.g. contractions, interjections)\n"
+        "- Keep it natural and conversational\n"
         "- Never robotic or overly formal\n"
         "- Keep conversations focused and helpful\n\n"
         "YOUR ROLE:\n"
         "Help customers schedule appointments and resolve issues efficiently over the phone.\n\n"
         "CRITICAL PHONE RULES:\n"
-        "- Maximum 20 words per response\n"
         "- ONE question at a time\n"
-        "- Natural conversational speech\n"
-        "- No formatting, bullets, or lists or emojis\n\n"
-        "CONVERSATION FLOW:\n"
-        "1. Greet the customer warmly\n"
-        "2. Ask for phone number, then call check_customer_history\n"
-        "3. If existing customer: greet by name and ask what service they need\n"
-        "   If new customer: collect details (make, model, km, name, email) then call add_customer_record\n"
-        "4. Get service details, call get_service_pricing, quote the price\n"
-        "5. When ready to schedule, call check_availability and offer 2-3 options\n"
-        "6. Confirm details and call create_event only after explicit customer confirmation\n\n"
-        "CRITICAL RULES:\n"
-        "- NEVER make up prices\n"
-        "- NEVER book without confirmation\n"
-        "- ALWAYS keep responses under 20 words\n"
-        "- ONE question per response\n"
-        "- Use natural phone speech"
+        "- Natural conversational speech make sure to use fillers like um, uh, and you know to make the conversation feel more human\n"
+        # "CONVERSATION FLOW:\n"
+        # "1. Greet the customer warmly\n"
+        # "2. Ask for phone number, then call check_customer_history\n"
+        # "3. If existing customer: greet by name and ask what service they need\n"
+        # "  If new customer: collect details (make, model, km, name, email) then call add_customer_record\n"
+        # "4. Get service details, call get_service_pricing, quote the price\n"
+        # "5. When ready to schedule, call check_availability and offer 2-3 options\n"
+        # "6. Confirm details and call create_event only after explicit customer confirmation\n\n"
+        # "CRITICAL RULES:\n"
+        # "- NEVER make up prices\n"
+        # "- NEVER book without confirmation\n"
+        # "- ALWAYS keep responses under 20 words\n"
+        # "- ONE question per response\n"
+        # "- Use natural phone speech"
     )
 
     # Customize for known VIP callers (example)
@@ -341,28 +341,28 @@ def build_session_config(
     ]
 
     session_config = {
-        "model": "gpt-4o-realtime-preview",
-        "voice": "coral",
+        "type":"realtime",
+        "model": "gpt-realtime",
         "instructions": instructions,
-        "tools": tools,
-        "mcp_servers": [
-            {
-                "url": MCP_SERVER_URL,
-                "allowed_tools": [
-                    "check_customer_history",
-                    "add_customer_record",
-                    "get_service_pricing",
-                    "check_availability",
-                    "create_event",
-                ],
-            }
-        ],
-        "turn_detection": {
-            "type": "semantic_vad",
-        },
-        "temperature": 0.7,
-        "input_audio_format": "g711_ulaw",
-        "output_audio_format": "g711_ulaw",
+        # "tools": [
+        # {
+        # "type": "mcp",                           # ← required
+        # "server_label": "auto-shop-tools",       # ← required
+        # "server_url": MCP_SERVER_URL,            # ← required (not "url")
+        # "allowed_tools": [                       # ← this key IS correct for McpTool
+        #     "check_customer_history",
+        #     "add_customer_record",
+        #     "get_service_pricing",
+        #     "check_availability",
+        #     "create_event",
+        # ]}],
+        "audio": {
+        "input":  {"format": "g711_ulaw",
+                              "turn_detection": {
+                              "type": "semantic_vad",
+                              }},
+        "output": {"format": "g711_ulaw","voice": "alloy"},
+    }
     }
 
     return session_config
@@ -389,7 +389,7 @@ async def accept_call(call_id: str, sip_headers: Optional[dict] = None) -> dict:
 
     session_config = build_session_config(caller_number, sip_headers)
     url = f"{OPENAI_REALTIME_BASE}/calls/{call_id}/accept"
-
+    print(f"[SIP] session config call {call_id} with session config: {session_config}")
     print(f"[SIP] Accepting call {call_id} from {caller_number or 'unknown'}")
 
     async with aiohttp.ClientSession() as session:
@@ -401,7 +401,10 @@ async def accept_call(call_id: str, sip_headers: Optional[dict] = None) -> dict:
                 "Content-Type": "application/json",
             },
         ) as resp:
-            resp_data = await resp.json() if resp.status == 200 else {"error": await resp.text()}
+            try:
+                resp_data = await resp.json()
+            except Exception:
+                resp_data = {"raw_error": await resp.text()}
             print(f"[SIP] Accept response ({resp.status}): {json.dumps(resp_data)[:300]}")
 
     # Track the call
@@ -467,7 +470,6 @@ async def hangup_call(call_id: str, reason: str = "Normal") -> dict:
     async with aiohttp.ClientSession() as session:
         async with session.post(
             url,
-            json={},
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "Content-Type": "application/json",
