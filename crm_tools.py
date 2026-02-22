@@ -17,7 +17,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from typing import Optional
 
 import aiohttp
@@ -356,6 +356,7 @@ async def _calendly_request(
 
 # ---------------------------------------------------------------------------
 # Tool: check_availability
+# Exact port of CalendlyMCPServer.checkAvailability() in calendly-server.ts
 # ---------------------------------------------------------------------------
 async def check_availability(
     eventTypeUri: str,
@@ -364,43 +365,47 @@ async def check_availability(
 ) -> str:
     """Return available Calendly time slots in the given window.
 
+    Mirrors CalendlyMCPServer.checkAvailability() from calendly-server.ts:
+    - Builds endpoint with per-parameter encodeURIComponent (quote)
+    - Returns plain text when no slots found
+    - Maps slots to {start_time, status, invitees_remaining}
+    - Returns JSON {event_type, search_period, total_slots, available_times}
+    - Raises on API error (caught by dispatch())
+
     Args:
         eventTypeUri: Full Calendly event type URI.
         startTime:    Window start in ISO 8601 (e.g. "2025-12-15T00:00:00Z").
-        endTime:      Window end in ISO 8601 (e.g.  "2025-12-21T23:59:59Z").
+        endTime:      Window end in ISO 8601 (e.g. "2025-12-21T23:59:59Z").
 
     Returns:
-        JSON string listing available slots, or a message if none found.
+        JSON string listing available slots, or plain-text message if none.
     """
     print(f"[CRM] check_availability: {eventTypeUri} [{startTime} → {endTime}]")
 
-    params = urlencode({
-        "event_type": eventTypeUri,
-        "start_time": startTime,
-        "end_time":   endTime,
-    })
+    # Match TS: `/event_type_available_times?event_type=${encodeURIComponent(...)}&...`
+    endpoint = (
+        f"/event_type_available_times"
+        f"?event_type={quote(eventTypeUri, safe='')}"
+        f"&start_time={quote(startTime, safe='')}"
+        f"&end_time={quote(endTime, safe='')}"
+    )
 
     try:
-        data = await _calendly_request(f"/event_type_available_times?{params}")
+        data = await _calendly_request(endpoint)
     except Exception as exc:
-        print(f"[CRM] check_availability error: {exc}")
-        return json.dumps({"error": f"Failed to check availability: {exc}"})
+        raise RuntimeError(f"Failed to check availability: {exc}")
 
-    collection = data.get("collection", [])
+    collection = data.get("collection") or []
+
     if not collection:
-        return json.dumps(
-            {
-                "available_slots": [],
-                "message": f"No available time slots between {startTime} and {endTime}",
-            },
-            indent=2,
-        )
+        # Match TS plain-text response (no JSON wrapper) when empty
+        return f"No available time slots found between {startTime} and {endTime}"
 
-    slots = [
+    available_slots = [
         {
-            "start_time":          slot.get("start_time"),
-            "status":              slot.get("status"),
-            "invitees_remaining":  slot.get("invitees_remaining"),
+            "start_time":         slot.get("start_time"),
+            "status":             slot.get("status"),
+            "invitees_remaining": slot.get("invitees_remaining"),
         }
         for slot in collection
     ]
@@ -409,8 +414,8 @@ async def check_availability(
         {
             "event_type":    eventTypeUri,
             "search_period": {"start": startTime, "end": endTime},
-            "total_slots":   len(slots),
-            "available_times": slots,
+            "total_slots":   len(available_slots),
+            "available_times": available_slots,
         },
         indent=2,
     )
@@ -418,6 +423,7 @@ async def check_availability(
 
 # ---------------------------------------------------------------------------
 # Tool: create_event
+# Exact port of CalendlyMCPServer.createEvent() in calendly-server.ts
 # ---------------------------------------------------------------------------
 async def create_event(
     eventTypeUri: str,
@@ -429,18 +435,29 @@ async def create_event(
 ) -> str:
     """Create a single-use Calendly scheduling link for a customer.
 
-    Mirrors the TypeScript createEvent() function exactly.
+    Mirrors CalendlyMCPServer.createEvent() from calendly-server.ts exactly:
+
+    Step 1 — GET /event_types/{id}  (id = last segment of eventTypeUri)
+    Step 2 — If preferredDate given: check availability for that calendar day
+             (00:00:00Z → 23:59:59Z), keep up to 5 slots as {start_time, status}
+    Step 3 — POST /scheduling_links  {max_event_count:1, owner, owner_type}
+             (no date_setting — simpler link that lets customer pick any slot)
+    Step 4 — Build pre-filled URL: name, email, a1=phone, a2=notes
+             (no date/time appended to URL params)
+    Step 5 — Return JSON {success, message, event_type, customer, booking_url,
+             scheduling_url_expires, workflow, automation_options}
+             + optional available_slots_on_preferred_date / preferred_date
 
     Args:
         eventTypeUri:  Full Calendly event type URI.
         customerName:  Customer full name.
         customerEmail: Customer email address.
-        customerPhone: Customer phone number (optional).
-        preferredDate: ISO 8601 datetime to pre-select (optional).
-        notes:         Booking notes (optional).
+        customerPhone: Customer phone number, mapped to query param a1. Optional.
+        preferredDate: ISO 8601 date/datetime for availability check. Optional.
+        notes:         Booking notes, mapped to query param a2. Optional.
 
     Returns:
-        JSON string with booking URL, event details, and workflow guidance.
+        JSON string with booking URL and workflow guidance.
     """
     print(
         f"[CRM] create_event: {customerName} <{customerEmail}>, "
@@ -448,161 +465,108 @@ async def create_event(
     )
 
     try:
-        # Step 1 — Fetch event type details
+        # Step 1 — Get event type details
+        # Use .split('/').pop() to extract just the UUID, same as TS
         event_type_id = eventTypeUri.split("/")[-1]
         event_type_data = await _calendly_request(f"/event_types/{event_type_id}")
         event_type = event_type_data.get("resource", {})
 
-        # Step 2 — Create single-use scheduling link
-        link_payload: dict = {
-            "max_event_count": 1,
-            "owner":           eventTypeUri,
-            "owner_type":      "EventType",
-        }
+        # Step 2 — Check availability if preferred date provided
+        available_slots: Optional[list] = None
         if preferredDate:
-            date_only = preferredDate[:10]  # "YYYY-MM-DD"
-            link_payload["date_setting"] = {
-                "type":       "date_range",
-                "start_date": date_only,
-                "end_date":   date_only,
-            }
+            # Extract date portion and build full-day UTC window (matches TS setHours logic)
+            date_str = preferredDate[:10]   # "YYYY-MM-DD"
+            day_start = f"{date_str}T00:00:00Z"
+            day_end   = f"{date_str}T23:59:59Z"
+            avail_endpoint = (
+                f"/event_type_available_times"
+                f"?event_type={quote(eventTypeUri, safe='')}"
+                f"&start_time={quote(day_start, safe='')}"
+                f"&end_time={quote(day_end, safe='')}"
+            )
+            try:
+                avail_data = await _calendly_request(avail_endpoint)
+                # Keep top 5 slots mapped to {start_time, status} — matches TS .slice(0,5).map(...)
+                available_slots = [
+                    {
+                        "start_time": slot.get("start_time"),
+                        "status":     slot.get("status"),
+                    }
+                    for slot in (avail_data.get("collection") or [])[:5]
+                ]
+            except Exception as avail_exc:
+                print(f"[CRM] Could not fetch availability: {avail_exc}")
+                # Matches TS: console.error + continue (no re-raise)
 
+        # Step 3 — Create one-time scheduling link (no date_setting — matches TS)
         link_response = await _calendly_request(
-            "/scheduling_links", method="POST", body=link_payload
+            "/scheduling_links",
+            method="POST",
+            body={
+                "max_event_count": 1,
+                "owner":           eventTypeUri,
+                "owner_type":      "EventType",
+            },
         )
-        booking_url = link_response["resource"]["booking_url"]
+        scheduling_url = link_response["resource"]["booking_url"]
 
-        # Step 3 — Build pre-filled URL
+        # Step 4 — Build pre-filled URL with customer info
+        # Matches TS: name, email, a1=phone, a2=notes  (no date/time params)
         params: dict = {"name": customerName, "email": customerEmail}
         if customerPhone:
             params["a1"] = customerPhone
         if notes:
             params["a2"] = notes
-        if preferredDate:
-            params["date"] = preferredDate[:10]
-            if "T" in preferredDate:
-                time_part = preferredDate.split("T")[1][:5]  # "HH:MM"
-                params["time"] = time_part
+        prefilled_url = f"{scheduling_url}?{urlencode(params)}"
 
-        prefilled_url = f"{booking_url}?{urlencode(params)}"
-
-        # Step 4 — Optionally check availability for the preferred date
-        availability_info: Optional[dict] = None
-        if preferredDate:
-            try:
-                date_start = preferredDate[:10] + "T00:00:00Z"
-                date_end   = preferredDate[:10] + "T23:59:59Z"
-                avail_params = urlencode({
-                    "event_type": eventTypeUri,
-                    "start_time": date_start,
-                    "end_time":   date_end,
-                })
-                avail_data = await _calendly_request(
-                    f"/event_type_available_times?{avail_params}"
-                )
-                avail_collection = avail_data.get("collection", [])
-                if avail_collection:
-                    exact_slot = next(
-                        (
-                            s for s in avail_collection
-                            if s.get("start_time", "") == preferredDate
-                        ),
-                        None,
-                    )
-                    availability_info = {
-                        "requested_time":      preferredDate,
-                        "exact_slot_available": exact_slot is not None,
-                        "total_slots_on_date": len(avail_collection),
-                        "nearest_slots": [
-                            {
-                                "start_time":         s.get("start_time"),
-                                "status":             s.get("status"),
-                                "invitees_remaining": s.get("invitees_remaining"),
-                            }
-                            for s in avail_collection[:3]
-                        ],
-                    }
-                else:
-                    availability_info = {
-                        "requested_time":      preferredDate,
-                        "exact_slot_available": False,
-                        "total_slots_on_date": 0,
-                        "message": "No availability on requested date",
-                    }
-            except Exception as avail_exc:
-                availability_info = {
-                    "requested_time": preferredDate,
-                    "error": f"Could not check availability: {avail_exc}",
-                }
-
-        # Step 5 — Build response
+        # Step 5 — Build response (mirrors TS response object exactly)
         result: dict = {
-            "success":          True,
-            "message": (
-                "Scheduling link created with preferred date/time pre-selected"
-                if preferredDate
-                else "Scheduling link generated — customer can select any available time"
-            ),
-            "booking_url":       prefilled_url,
-            "booking_url_short": booking_url,
-            "expires_after":     "1 booking",
-            "event_details": {
+            "success": True,
+            "message": "Appointment booking initiated",
+            "event_type": {
                 "name":        event_type.get("name"),
-                "duration":    f"{event_type.get('duration')} minutes",
-                "description": event_type.get("description_plain") or "No description",
-                "type":        event_type.get("type"),
+                "duration":    event_type.get("duration"),
+                "description": event_type.get("description_plain"),
             },
             "customer": {
                 "name":  customerName,
                 "email": customerEmail,
                 "phone": customerPhone or "Not provided",
-                "notes": notes or "None",
+            },
+            "booking_url":              prefilled_url,
+            "scheduling_url_expires":   "After 1 booking",
+            "workflow": {
+                "step":   1,
+                "status": "awaiting_customer_confirmation",
+                "next_steps": [
+                    "Send booking link to customer via email or SMS",
+                    "Customer selects available time slot",
+                    "Customer confirms booking",
+                    "System sends confirmation emails",
+                    "Event appears in both calendars",
+                ],
+            },
+            "automation_options": {
+                "email_template": (
+                    f"Hi {customerName},\n\nThank you for booking with us! "
+                    f"Please click the link below to select your preferred appointment time:"
+                    f"\n\n{prefilled_url}\n\nBest regards"
+                ),
+                "sms_template": (
+                    f"Hi {customerName}, book your appointment here: {prefilled_url}"
+                ),
             },
         }
 
-        if preferredDate:
-            result["preferred_datetime"] = {
-                "requested": preferredDate,
-                "date":      preferredDate[:10],
-                "time":      preferredDate.split("T")[1][:5] if "T" in preferredDate else "",
-                "timezone":  "UTC",
-            }
-
-        if availability_info:
-            result["availability"] = availability_info
-
-        result["workflow"] = (
-            {
-                "current_step": "Link generated with pre-selected date/time",
-                "status":       "Awaiting customer confirmation",
-                "next_steps": [
-                    "1. Share the booking_url with the customer",
-                    "2. Customer reviews pre-selected date/time",
-                    "3. Customer confirms or selects alternative",
-                    "4. Booking confirmed automatically",
-                    "5. Both parties receive confirmation email",
-                ],
-            }
-            if preferredDate
-            else {
-                "current_step": "Link generated",
-                "status":       "Awaiting customer to select time",
-                "next_steps": [
-                    "1. Share the booking_url with the customer",
-                    "2. Customer selects preferred time",
-                    "3. Customer confirms booking",
-                    "4. Both parties receive confirmation email",
-                ],
-            }
-        )
+        # Spread available_slots into result only when present (matches TS `...spread`)
+        if available_slots is not None:
+            result["available_slots_on_preferred_date"] = available_slots
+            result["preferred_date"] = preferredDate
 
         return json.dumps(result, indent=2)
 
     except Exception as exc:
-        print(f"[CRM] create_event error: {exc}")
-        import traceback
-        traceback.print_exc()
-        return json.dumps({"error": f"Failed to create event: {exc}"})
+        raise RuntimeError(f"Failed to create event: {exc}")
 
 
 # ---------------------------------------------------------------------------
