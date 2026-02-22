@@ -8,6 +8,7 @@ Uses OpenAI Realtime API with SIP trunking:
 - Call lifecycle management (accept, reject, hangup, transfer)
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -19,6 +20,7 @@ from typing import Optional
 
 import aiohttp
 from dotenv import load_dotenv
+import websockets
 
 load_dotenv()
 
@@ -28,7 +30,7 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_WEBHOOK_SECRET = os.getenv("OPENAI_WEBHOOK_SECRET", "")
 OPENAI_REALTIME_BASE = "https://api.openai.com/v1/realtime"
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:3100/mcp")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://silly-taxes-behave.loca.lt/mcp")
 
 # Maximum allowed age for webhook timestamps (5 minutes)
 WEBHOOK_TIMESTAMP_TOLERANCE = 300
@@ -207,23 +209,30 @@ def build_session_config(
         "- Keep conversations focused and helpful\n\n"
         "YOUR ROLE:\n"
         "Help customers schedule appointments and resolve issues efficiently over the phone.\n\n"
-        "CRITICAL PHONE RULES:\n"
-        "- ONE question at a time\n"
-        "- Natural conversational speech make sure to use fillers like um, uh, and you know to make the conversation feel more human\n"
-        # "CONVERSATION FLOW:\n"
-        # "1. Greet the customer warmly\n"
-        # "2. Ask for phone number, then call check_customer_history\n"
-        # "3. If existing customer: greet by name and ask what service they need\n"
-        # "  If new customer: collect details (make, model, km, name, email) then call add_customer_record\n"
-        # "4. Get service details, call get_service_pricing, quote the price\n"
-        # "5. When ready to schedule, call check_availability and offer 2-3 options\n"
-        # "6. Confirm details and call create_event only after explicit customer confirmation\n\n"
-        # "CRITICAL RULES:\n"
-        # "- NEVER make up prices\n"
-        # "- NEVER book without confirmation\n"
-        # "- ALWAYS keep responses under 20 words\n"
-        # "- ONE question per response\n"
-        # "- Use natural phone speech"
+    "=== ABSOLUTE RULES (NEVER VIOLATE) ===\n"
+    "RULE 1: When customer says a phone number → IMMEDIATELY call check_customer_history. Do not say ANYTHING until you get the result.\n"
+    "RULE 2: When customer mentions a service → IMMEDIATELY call get_service_pricing. Never quote prices without calling this.\n"
+    "RULE 3: When customer wants to book → IMMEDIATELY call check_availability. Never suggest times without calling this.\n"
+    "RULE 4: Maximum 15 words per response. ONE question at a time.\n"
+    "RULE 5: Never say 'let me check' - just call the tool silently.\n\n"
+    
+    "=== CONVERSATION SCRIPT ===\n"
+    "Step 1: Say 'Hi! This is Sarah from Elite Auto. What's your phone number?'\n"
+    "Step 2: When they say a number → STOP TALKING → call check_customer_history(phone_number='their number')\n"
+    "Step 3: After tool returns:\n"
+    "  - If customer found: Say 'Hey [NAME]! How can I help with your [VEHICLE]?'\n"
+    "  - If new customer: Say 'Thanks! What kind of vehicle do you have?'\n"
+    "Step 4: When they mention service (oil change, brakes, etc) → STOP TALKING → call get_service_pricing(service_type='what they said', vehicle_type='sedan or suv or truck')\n"
+    "Step 5: After tool returns: Say EXACTLY '[SERVICE] is [PRICE from tool]. Want to book it?'\n"
+    "Step 6: If they say yes → STOP TALKING → call check_availability()\n"
+    "Step 7: Read 2-3 times from tool result, ask 'Which works for you?'\n"
+    "Step 8: After they pick → Say 'Confirming [DATE TIME] for [SERVICE]. Correct?'\n"
+    "Step 9: If yes → call create_event with all details\n\n"
+    
+    "=== PHONE BEHAVIOR ===\n"
+    "- Sound human, use fillers like 'um', 'uh' sparingly\n"
+    "- Never robotic\n"
+    "- Keep it brief and natural\n"
     )
 
     # Customize for known VIP callers (example)
@@ -233,129 +242,25 @@ def build_session_config(
             instructions += "\n\nThis is a VIP customer. Prioritize their requests."
 
     # Tool definitions for OpenAI Realtime function calling
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "check_customer_history",
-                "description": "Check customer history by phone number. Call this immediately when you get the customer's phone number.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "phone_number": {
-                            "type": "string",
-                            "description": "Customer phone number in E.164 format",
-                        }
-                    },
-                    "required": ["phone_number"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_customer_record",
-                "description": "Add a new customer record to the CRM. Use for new customers after getting name and email.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "make": {"type": "string", "description": "Vehicle make"},
-                        "model": {"type": "string", "description": "Vehicle model"},
-                        "kilometers": {"type": "string", "description": "Vehicle mileage in km"},
-                        "name": {"type": "string", "description": "Customer full name"},
-                        "email": {"type": "string", "description": "Customer email"},
-                        "phone": {"type": "string", "description": "Customer phone number"},
-                        "issue": {"type": "string", "description": "Service issue description"},
-                        "status": {"type": "string", "description": "Record status (open/closed)"},
-                        "priority": {"type": "string", "description": "Priority level (low/medium/high)"},
-                        "notes": {"type": "string", "description": "Additional notes"},
-                    },
-                    "required": ["make", "model", "kilometers", "name", "email"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_service_pricing",
-                "description": "Get pricing for a car service. Never guess prices, always call this tool.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "service_type": {
-                            "type": "string",
-                            "description": "Type of service (oil change, brake service, etc.)",
-                        },
-                        "vehicle_type": {
-                            "type": "string",
-                            "description": "Vehicle type (sedan, SUV, truck)",
-                        },
-                    },
-                    "required": ["service_type", "vehicle_type"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "check_availability",
-                "description": "Get available appointment time slots. Call when customer wants to schedule.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "event_type_uri": {
-                            "type": "string",
-                            "description": "Calendly event type URI",
-                        },
-                        "start_time": {
-                            "type": "string",
-                            "description": "Start of availability window (ISO 8601)",
-                        },
-                        "end_time": {
-                            "type": "string",
-                            "description": "End of availability window (ISO 8601)",
-                        },
-                    },
-                    "required": [],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_event",
-                "description": "Create an appointment booking. Only call after explicit customer confirmation.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "eventTypeUri": {"type": "string", "description": "Calendly event type URI"},
-                        "customerName": {"type": "string", "description": "Customer full name"},
-                        "customerEmail": {"type": "string", "description": "Customer email"},
-                        "customerPhone": {"type": "string", "description": "Customer phone number"},
-                        "preferredDate": {"type": "string", "description": "Preferred date/time (ISO 8601)"},
-                    },
-                    "required": ["eventTypeUri", "customerName", "customerEmail", "customerPhone", "preferredDate"],
-                },
-            },
-        },
-    ]
 
     session_config = {
         "type":"realtime",
         "model": "gpt-realtime",
         "instructions": instructions,
-        # "tools": [
-        # {
-        # "type": "mcp",                           # ← required
-        # "server_label": "auto-shop-tools",       # ← required
-        # "server_url": MCP_SERVER_URL,            # ← required (not "url")
-        # "allowed_tools": [                       # ← this key IS correct for McpTool
-        #     "check_customer_history",
-        #     "add_customer_record",
-        #     "get_service_pricing",
-        #     "check_availability",
-        #     "create_event",
-        # ]}],
+        "tool_choice": "auto",
+        "tools": [
+        {
+        "type": "mcp",                           
+        "server_label": "crm-mcp-server",       
+        "server_url": MCP_SERVER_URL,            
+        "allowed_tools": [                       
+            "check_customer_history",
+            "add_customer_record",
+            "get_service_pricing",
+            "check_availability",
+            "create_event"]
+        }],
+        
         "audio": {
         "input":  {"format": "g711_ulaw",
                               "turn_detection": {
@@ -389,7 +294,6 @@ async def accept_call(call_id: str, sip_headers: Optional[dict] = None) -> dict:
 
     session_config = build_session_config(caller_number, sip_headers)
     url = f"{OPENAI_REALTIME_BASE}/calls/{call_id}/accept"
-    print(f"[SIP] session config call {call_id} with session config: {session_config}")
     print(f"[SIP] Accepting call {call_id} from {caller_number or 'unknown'}")
 
     async with aiohttp.ClientSession() as session:
@@ -411,6 +315,56 @@ async def accept_call(call_id: str, sip_headers: Optional[dict] = None) -> dict:
     create_call_record(call_id, caller_number, datetime.now(timezone.utc).isoformat())
 
     return resp_data
+
+# ═══════════════════════════════════════════════════════════
+# Step 2: Monitoring (NOT tool execution)
+# ═══════════════════════════════════════════════════════════
+
+async def monitor_call(call_id: str):
+    """
+    Observe the call for logging/analytics.
+    Tool execution happens automatically - you just watch.
+    """
+    ws_url = f"wss://api.openai.com/v1/realtime?call_id={call_id}"
+    
+    async with websockets.connect(
+        ws_url,
+        extra_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    ) as ws:
+        async for message in ws:
+            event = json.loads(message)
+            
+            # Log all response events
+            if event["type"].startswith("response."):
+                print(f"[Call {call_id}] {event['type']}")
+            # Specifically watch for tool calls
+            if event["type"] == "response.function_call_arguments.done":
+                print(f"✓✓✓ TOOL CALLED: {event['name']}")
+                print(f"    Arguments: {event['arguments']}")
+
+            if event["type"] == "response.function_call_arguments.error":
+                print(f"✖️✖️✖️ TOOL CALL FAILED: {event['name']}")
+                print(f"    Error: {event['error']}")
+
+            if event["type"] == "conversation.item.created":
+                item = event["item"]
+                if item["type"] == "mcp_list_tools":
+                    print(f"✓ MCP tools loaded: {item['content'][:200]}")
+            
+            # Check if model even TRIES to call tools
+            if event["type"] == "response.output_item.added":
+                item = event["item"]
+                print(f"Response item type: {item['type']}") 
+            # Watch for responses without tools
+            if event["type"] == "response.done":
+                output = event["response"]["output"]
+                has_tool_call = any(
+                    item.get("type") == "function_call" 
+                    for item in output
+                )
+                if not has_tool_call:
+                    print(f"⚠️ Response completed WITHOUT calling any tools")
+                    print(f"   Output items: {[item['type'] for item in output]}")
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +574,8 @@ async def _handle_incoming_call(payload: dict) -> tuple[dict, int]:
     # Accept the call
     try:
         result = await accept_call(call_id, sip_headers)
+        # Start monitoring in background (optional)
+        asyncio.create_task(monitor_call(call_id))
         return {"status": "accepted", "call_id": call_id, "result": result}, 200
     except Exception as e:
         print(f"[SIP] Error accepting call {call_id}: {e}")
@@ -637,3 +593,4 @@ def log_event(event_type: str, payload: dict) -> None:
     """
     print(f"[SIP] Event logged: {event_type}")
     print(f"[SIP] Payload: {json.dumps(payload)[:500]}")
+
