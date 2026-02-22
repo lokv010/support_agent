@@ -4,7 +4,7 @@ Workflow Client - Assistants API Integration
 Works with Twilio Native architecture:
 - Receives text from Twilio STT
 - Processes with OpenAI Assistants API
-- Executes CRM tools via the /execute REST endpoint (no MCP protocol)
+- Executes CRM tools in-process via crm_tools module (no MCP, no HTTP)
 - Returns text for Twilio TTS
 
 NO audio handling - pure text processing
@@ -13,138 +13,85 @@ NO audio handling - pure text processing
 from agents import Agent, Runner, SQLiteSession, function_tool
 import os
 import asyncio
-import aiohttp
-import json as _json
+
+import crm_tools  # native Python CRM implementations (no HTTP, no MCP)
+
+
+# Default Calendly event type URI (can be overridden via env var)
+_DEFAULT_EVENT_TYPE_URI = os.getenv(
+    "CALENDLY_EVENT_TYPE_URI",
+    "https://api.calendly.com/event_types/3b49691f-afd5-4c92-8042-e39ad9f76827",
+)
 
 # ---------------------------------------------------------------------------
-# CRM Server Configuration
-# ---------------------------------------------------------------------------
-# Direct function-execution endpoint — no MCP JSON-RPC protocol.
-CRM_EXECUTE_URL = os.getenv("CRM_EXECUTE_URL", "http://localhost:3100/execute")
-
-
-async def _call_crm_tool(tool_name: str, arguments: dict) -> str:
-    """Execute a CRM tool function via the /execute REST endpoint.
-
-    Replaces the previous MCP JSON-RPC approach.
-    The CRM server exposes the same tool logic at POST /execute without
-    any MCP session management or protocol framing.
-
-    Args:
-        tool_name: Name of the CRM tool to invoke.
-        arguments: Arguments dict to pass to the tool.
-
-    Returns:
-        Plain-text result string from the tool.
-    """
-    print(f"[CRM_CALL] → {tool_name} | URL: {CRM_EXECUTE_URL}")
-    print(f"[CRM_CALL] → Args: {_json.dumps(arguments, indent=2)}")
-
-    try:
-        async with aiohttp.ClientSession() as http:
-            async with http.post(
-                CRM_EXECUTE_URL,
-                json={"name": tool_name, "arguments": arguments},
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                print(f"[CRM_CALL] ← Status: {response.status}")
-                if response.status == 200:
-                    data = await response.json()
-                    result = data.get("result", str(data))
-                    print(f"[CRM_CALL] ← Result: {result[:300]}")
-                    return result
-                else:
-                    body = await response.text()
-                    print(f"[CRM_CALL] ← ERROR {response.status}: {body[:500]}")
-                    return f"Error: CRM server returned status {response.status}: {body}"
-    except Exception as exc:
-        print(f"[CRM_CALL] ← EXCEPTION: {tool_name}: {exc}")
-        import traceback
-        traceback.print_exc()
-        return f"Error calling CRM tool {tool_name}: {exc}"
-
-
-# ---------------------------------------------------------------------------
-# Function Tools — each calls the CRM /execute endpoint directly
+# Function Tools — call crm_tools directly (no HTTP, no MCP)
 # ---------------------------------------------------------------------------
 
 @function_tool
 async def check_customer_history(phone_number: str) -> str:
     """Check customer history by phone number. Call this immediately when you get the customer's phone number."""
-    return await _call_crm_tool("check_customer_history", {"phone_number": phone_number})
+    return await crm_tools.check_customer_history(phone_number)
 
 
 @function_tool
 async def add_customer_record(
-    make: str,
-    model: str,
-    kilometers: str,
     name: str,
     email: str,
-    phone: str = "",
     issue: str = "New customer inquiry",
     status: str = "open",
     priority: str = "medium",
+    make: str = "",
+    model: str = "",
+    kilometers: str = "",
+    phone: str = "",
     notes: str = "",
 ) -> str:
     """Add a new customer record to the CRM. Use this for new customers after getting their name and email."""
-    args: dict = {
-        "make": make,
-        "model": model,
-        "km": kilometers,
-        "name": name,
-        "email": email,
-        "issue": issue,
-        "status": status,
-        "priority": priority,
-        "notes": notes,
-    }
-    if phone:
-        args["phone"] = phone
-    if notes:
-        args["notes"] = notes
-    return await _call_crm_tool("add_customer_record", args)
+    return await crm_tools.add_customer_record(
+        name=name,
+        email=email,
+        issue=issue,
+        status=status,
+        priority=priority,
+        make=make,
+        model=model,
+        km=kilometers,
+        phone=phone,
+        notes=notes,
+    )
 
 
 @function_tool
 async def get_service_pricing(service_type: str, vehicle_type: str) -> str:
     """Get pricing for a car service. Never guess prices — always call this tool. Common services: oil change, full service, brake service, tire rotation, engine diagnostic, transmission service, ac service, battery replacement."""
-    return await _call_crm_tool("get_service_pricing", {
-        "service_type": service_type,
-        "vehicle_type": vehicle_type,
-    })
+    return await crm_tools.get_service_pricing(service_type, vehicle_type)
 
 
 @function_tool
-async def check_availability(event_type_uri: str, start_time: str = "", end_time: str = "") -> str:
-    """Get available appointment time slots for the week containing the reference date. Call when the customer wants to schedule."""
-    args: dict = {"eventTypeUri": 'https://api.calendly.com/event_types/3b49691f-afd5-4c92-8042-e39ad9f76827'}
-    if start_time:
-        args["startTime"] = start_time
-    if end_time:
-        args["endTime"] = end_time
-    return await _call_crm_tool("check_availability", args)
+async def check_availability(start_time: str = "", end_time: str = "") -> str:
+    """Get available appointment time slots. Call when the customer wants to schedule."""
+    return await crm_tools.check_availability(
+        eventTypeUri=_DEFAULT_EVENT_TYPE_URI,
+        startTime=start_time,
+        endTime=end_time,
+    )
 
 
 @function_tool
 async def create_event(
-  eventTypeUri: str,
     customerName: str,
     customerEmail: str,
-    customerPhone: str,
-    preferredDate: str
+    customerPhone: str = "",
+    preferredDate: str = "",
 ) -> str:
     """Create an appointment booking for the customer. Only call this after explicit customer confirmation."""
-    args: dict = {
-        "eventTypeUri": 'https://api.calendly.com/event_types/3b49691f-afd5-4c92-8042-e39ad9f76827',
-        "customerName": customerName,
-        "customerEmail": customerEmail,
-        "customerPhone": customerPhone,
-        "preferredDate": preferredDate
-    }
-
-    return await _call_crm_tool("create_event", args)
+    return await crm_tools.create_event(
+        eventTypeUri=_DEFAULT_EVENT_TYPE_URI,
+        customerName=customerName,
+        customerEmail=customerEmail,
+        customerPhone=customerPhone,
+        preferredDate=preferredDate,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -10,8 +10,8 @@ Uses OpenAI Realtime API with SIP trunking:
 Tool execution:
   Tools are defined as regular OpenAI function-call tools (type="function").
   When the model requests a tool during a call, our WebSocket sideband handler
-  intercepts the event, calls the CRM server's /execute REST endpoint, and
-  sends the result back — no MCP protocol involved.
+  intercepts the event and calls the crm_tools module directly in-process
+  (Google Sheets, Calendly, static pricing) — no MCP protocol, no HTTP.
 """
 
 import asyncio
@@ -28,6 +28,8 @@ import aiohttp
 from dotenv import load_dotenv
 import websockets
 
+import crm_tools  # native Python CRM implementations
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -36,9 +38,6 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_WEBHOOK_SECRET = os.getenv("OPENAI_WEBHOOK_SECRET", "")
 OPENAI_REALTIME_BASE = "https://api.openai.com/v1/realtime"
-
-# CRM function execution endpoint — plain REST, no MCP protocol
-CRM_EXECUTE_URL = os.getenv("CRM_EXECUTE_URL", "http://localhost:3100/execute")
 
 # Maximum allowed age for webhook timestamps (5 minutes)
 WEBHOOK_TIMESTAMP_TOLERANCE = 300
@@ -445,42 +444,25 @@ async def accept_call(call_id: str, sip_headers: Optional[dict] = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. CRM function execution via REST
+# 5. CRM function execution — in-process via crm_tools module
 # ---------------------------------------------------------------------------
 async def _execute_crm_function(name: str, arguments: dict) -> str:
-    """Execute a CRM tool function by calling the /execute REST endpoint.
+    """Execute a CRM tool function directly using the crm_tools module.
 
-    This replaces the MCP protocol — the CRM server exposes the same tool
-    logic at POST /execute without any MCP framing.
+    No HTTP round-trip — the tool logic (Google Sheets, Calendly, pricing)
+    runs in-process inside the support_agent.
 
     Args:
-        name: Tool name (e.g. "check_customer_history").
+        name:      Tool name (e.g. "check_customer_history").
         arguments: Tool arguments dict parsed from the model's JSON output.
 
     Returns:
-        Plain-text result string to send back to the model.
+        Plain-text / JSON result string to send back to the model.
     """
-    print(f"[CRM] Calling /execute: tool={name} args={json.dumps(arguments)[:200]}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                CRM_EXECUTE_URL,
-                json={"name": name, "arguments": arguments},
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    result = data.get("result", str(data))
-                    print(f"[CRM] /execute result ({len(result)} chars): {result[:200]}")
-                    return result
-                else:
-                    text = await resp.text()
-                    print(f"[CRM] /execute error {resp.status}: {text[:300]}")
-                    return f"Error calling {name}: HTTP {resp.status} — {text[:200]}"
-    except Exception as exc:
-        print(f"[CRM] /execute exception: {exc}")
-        return f"Error calling {name}: {exc}"
+    print(f"[CRM] dispatch: tool={name} args={json.dumps(arguments)[:200]}")
+    result = await crm_tools.dispatch(name, arguments)
+    print(f"[CRM] dispatch result ({len(result)} chars): {result[:200]}")
+    return result
 
 
 # ---------------------------------------------------------------------------
