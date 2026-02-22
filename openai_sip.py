@@ -6,6 +6,12 @@ Uses OpenAI Realtime API with SIP trunking:
 - HMAC-SHA256 signature verification
 - Session config with voice model, tools, and MCP servers
 - Call lifecycle management (accept, reject, hangup, transfer)
+
+Tool execution:
+  Tools are defined as regular OpenAI function-call tools (type="function").
+  When the model requests a tool during a call, our WebSocket sideband handler
+  intercepts the event, calls the CRM server's /execute REST endpoint, and
+  sends the result back — no MCP protocol involved.
 """
 
 import asyncio
@@ -30,10 +36,140 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_WEBHOOK_SECRET = os.getenv("OPENAI_WEBHOOK_SECRET", "")
 OPENAI_REALTIME_BASE = "https://api.openai.com/v1/realtime"
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://silly-taxes-behave.loca.lt/mcp")
+
+# CRM function execution endpoint — plain REST, no MCP protocol
+CRM_EXECUTE_URL = os.getenv("CRM_EXECUTE_URL", "http://localhost:3100/execute")
 
 # Maximum allowed age for webhook timestamps (5 minutes)
 WEBHOOK_TIMESTAMP_TOLERANCE = 300
+
+# ---------------------------------------------------------------------------
+# Tool definitions — OpenAI function format (replaces type="mcp")
+# Schemas mirror the tool definitions in crm_mcp_server/src/mcp-server.ts
+# ---------------------------------------------------------------------------
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "name": "check_customer_history",
+        "description": (
+            "Check customer history by phone number. "
+            "Call IMMEDIATELY when the customer provides their phone number. "
+            "Do not respond to the customer until you get the result."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phone_number": {
+                    "type": "string",
+                    "description": "Customer phone number (e.g. +14155550123)",
+                },
+            },
+            "required": ["phone_number"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "add_customer_record",
+        "description": "Add a new customer support record to the CRM.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "make":     {"type": "string", "description": "Vehicle make (e.g. Toyota)"},
+                "model":    {"type": "string", "description": "Vehicle model (e.g. Corolla)"},
+                "km":       {"type": "string", "description": "Vehicle kilometres"},
+                "name":     {"type": "string", "description": "Customer name"},
+                "email":    {"type": "string", "description": "Customer email address"},
+                "phone":    {"type": "string", "description": "Customer phone number (optional)"},
+                "issue":    {"type": "string", "description": "Description of the customer issue"},
+                "status":   {
+                    "type": "string",
+                    "enum": ["open", "in-progress", "resolved", "closed"],
+                    "description": "Ticket status",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                    "description": "Priority level",
+                },
+                "notes":    {"type": "string", "description": "Additional notes (optional)"},
+            },
+            "required": ["name", "email", "issue", "status", "priority"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_service_pricing",
+        "description": (
+            "YOU MUST CALL THIS before quoting ANY price. "
+            "Never say a price without calling this first. "
+            "Common services: oil change, full service, brake service, tire rotation, "
+            "engine diagnostic, transmission service, ac service, battery replacement."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "service_type": {
+                    "type": "string",
+                    "description": "Type of service (e.g. oil change, brake service)",
+                },
+                "vehicle_type": {
+                    "type": "string",
+                    "description": "Type of vehicle: sedan, suv, or truck",
+                },
+            },
+            "required": ["service_type", "vehicle_type"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "check_availability",
+        "description": (
+            "YOU MUST CALL THIS before suggesting appointment times. "
+            "Do not make up time slots. Customer needs real availability."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "eventTypeUri": {
+                    "type": "string",
+                    "description": "The Calendly event type URI",
+                },
+                "startTime": {
+                    "type": "string",
+                    "description": "Start of search window (ISO 8601, e.g. 2025-12-15T00:00:00Z)",
+                },
+                "endTime": {
+                    "type": "string",
+                    "description": "End of search window (ISO 8601, e.g. 2025-12-22T23:59:59Z)",
+                },
+            },
+            "required": ["eventTypeUri", "startTime", "endTime"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "create_event",
+        "description": (
+            "Create an appointment booking for a customer with a scheduling link. "
+            "Only call this after the customer has explicitly confirmed the appointment."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "eventTypeUri":   {"type": "string", "description": "Calendly event type URI"},
+                "customerName":   {"type": "string", "description": "Customer name"},
+                "customerEmail":  {"type": "string", "description": "Customer email"},
+                "customerPhone":  {"type": "string", "description": "Phone number (optional)"},
+                "preferredDate":  {
+                    "type": "string",
+                    "description": "Preferred ISO datetime (optional, e.g. 2025-12-15T10:00:00Z)",
+                },
+                "notes":          {"type": "string", "description": "Booking notes (optional)"},
+            },
+            "required": ["eventTypeUri", "customerName", "customerEmail"],
+        },
+    },
+]
 
 # ---------------------------------------------------------------------------
 # In-memory call record store
@@ -188,8 +324,10 @@ def build_session_config(
 ) -> dict:
     """Construct the session configuration for an accepted call.
 
-    Assembles model, voice, instructions, tools, MCP servers, turn detection,
-    and temperature.  Optionally customises instructions based on caller number.
+    Tools are defined as regular OpenAI function-call tools so that the
+    model emits function-call events on the WebSocket sideband.  The
+    support_agent then executes them via the CRM server's /execute endpoint
+    and returns results — no MCP protocol involved.
 
     Args:
         caller_number: The caller's phone number (E.164).
@@ -209,30 +347,30 @@ def build_session_config(
         "- Keep conversations focused and helpful\n\n"
         "YOUR ROLE:\n"
         "Help customers schedule appointments and resolve issues efficiently over the phone.\n\n"
-    "=== ABSOLUTE RULES (NEVER VIOLATE) ===\n"
-    "RULE 1: When customer says a phone number → IMMEDIATELY call check_customer_history. Do not say ANYTHING until you get the result.\n"
-    "RULE 2: When customer mentions a service → IMMEDIATELY call get_service_pricing. Never quote prices without calling this.\n"
-    "RULE 3: When customer wants to book → IMMEDIATELY call check_availability. Never suggest times without calling this.\n"
-    "RULE 4: Maximum 15 words per response. ONE question at a time.\n"
-    "RULE 5: Never say 'let me check' - just call the tool silently.\n\n"
-    
-    "=== CONVERSATION SCRIPT ===\n"
-    "Step 1: Say 'Hi! This is Sarah from Elite Auto. What's your phone number?'\n"
-    "Step 2: When they say a number → STOP TALKING → call check_customer_history(phone_number='their number')\n"
-    "Step 3: After tool returns:\n"
-    "  - If customer found: Say 'Hey [NAME]! How can I help with your [VEHICLE]?'\n"
-    "  - If new customer: Say 'Thanks! What kind of vehicle do you have?'\n"
-    "Step 4: When they mention service (oil change, brakes, etc) → STOP TALKING → call get_service_pricing(service_type='what they said', vehicle_type='sedan or suv or truck')\n"
-    "Step 5: After tool returns: Say EXACTLY '[SERVICE] is [PRICE from tool]. Want to book it?'\n"
-    "Step 6: If they say yes → STOP TALKING → call check_availability()\n"
-    "Step 7: Read 2-3 times from tool result, ask 'Which works for you?'\n"
-    "Step 8: After they pick → Say 'Confirming [DATE TIME] for [SERVICE]. Correct?'\n"
-    "Step 9: If yes → call create_event with all details\n\n"
-    
-    "=== PHONE BEHAVIOR ===\n"
-    "- Sound human, use fillers like 'um', 'uh' sparingly\n"
-    "- Never robotic\n"
-    "- Keep it brief and natural\n"
+        "=== ABSOLUTE RULES (NEVER VIOLATE) ===\n"
+        "RULE 1: When customer says a phone number → IMMEDIATELY call check_customer_history. Do not say ANYTHING until you get the result.\n"
+        "RULE 2: When customer mentions a service → IMMEDIATELY call get_service_pricing. Never quote prices without calling this.\n"
+        "RULE 3: When customer wants to book → IMMEDIATELY call check_availability. Never suggest times without calling this.\n"
+        "RULE 4: Maximum 15 words per response. ONE question at a time.\n"
+        "RULE 5: Never say 'let me check' - just call the tool silently.\n\n"
+
+        "=== CONVERSATION SCRIPT ===\n"
+        "Step 1: Say 'Hi! This is Sarah from Elite Auto. What's your phone number?'\n"
+        "Step 2: When they say a number → STOP TALKING → call check_customer_history(phone_number='their number')\n"
+        "Step 3: After tool returns:\n"
+        "  - If customer found: Say 'Hey [NAME]! How can I help with your [VEHICLE]?'\n"
+        "  - If new customer: Say 'Thanks! What kind of vehicle do you have?'\n"
+        "Step 4: When they mention service (oil change, brakes, etc) → STOP TALKING → call get_service_pricing(service_type='what they said', vehicle_type='sedan or suv or truck')\n"
+        "Step 5: After tool returns: Say EXACTLY '[SERVICE] is [PRICE from tool]. Want to book it?'\n"
+        "Step 6: If they say yes → STOP TALKING → call check_availability()\n"
+        "Step 7: Read 2-3 times from tool result, ask 'Which works for you?'\n"
+        "Step 8: After they pick → Say 'Confirming [DATE TIME] for [SERVICE]. Correct?'\n"
+        "Step 9: If yes → call create_event with all details\n\n"
+
+        "=== PHONE BEHAVIOR ===\n"
+        "- Sound human, use fillers like 'um', 'uh' sparingly\n"
+        "- Never robotic\n"
+        "- Keep it brief and natural\n"
     )
 
     # Customize for known VIP callers (example)
@@ -241,33 +379,22 @@ def build_session_config(
         if vip_header == "true":
             instructions += "\n\nThis is a VIP customer. Prioritize their requests."
 
-    # Tool definitions for OpenAI Realtime function calling
-
     session_config = {
-        "type":"realtime",
+        "type": "realtime",
         "model": "gpt-realtime",
         "instructions": instructions,
         "tool_choice": "auto",
-        "tools": [
-        {
-        "type": "mcp",                           
-        "server_label": "crm-mcp-server",       
-        "server_url": MCP_SERVER_URL,            
-        "allowed_tools": [                       
-            "check_customer_history",
-            "add_customer_record",
-            "get_service_pricing",
-            "check_availability",
-            "create_event"]
-        }],
-        
+        # Regular function tools — handled via WebSocket sideband in support_agent
+        "tools": TOOL_DEFINITIONS,
         "audio": {
-        "input":  {"format": "g711_ulaw",
-                              "turn_detection": {
-                              "type": "semantic_vad",
-                              }},
-        "output": {"format": "g711_ulaw","voice": "alloy"},
-    }
+            "input": {
+                "format": "g711_ulaw",
+                "turn_detection": {
+                    "type": "semantic_vad",
+                },
+            },
+            "output": {"format": "g711_ulaw", "voice": "alloy"},
+        },
     }
 
     return session_config
@@ -316,59 +443,154 @@ async def accept_call(call_id: str, sip_headers: Optional[dict] = None) -> dict:
 
     return resp_data
 
-# ═══════════════════════════════════════════════════════════
-# Step 2: Monitoring (NOT tool execution)
-# ═══════════════════════════════════════════════════════════
 
-async def monitor_call(call_id: str):
+# ---------------------------------------------------------------------------
+# 5. CRM function execution via REST
+# ---------------------------------------------------------------------------
+async def _execute_crm_function(name: str, arguments: dict) -> str:
+    """Execute a CRM tool function by calling the /execute REST endpoint.
+
+    This replaces the MCP protocol — the CRM server exposes the same tool
+    logic at POST /execute without any MCP framing.
+
+    Args:
+        name: Tool name (e.g. "check_customer_history").
+        arguments: Tool arguments dict parsed from the model's JSON output.
+
+    Returns:
+        Plain-text result string to send back to the model.
     """
-    Observe the call for logging/analytics.
-    Tool execution happens automatically - you just watch.
-    """
-    ws_url = f"wss://api.openai.com/v1/realtime?call_id={call_id}"
-    
-    async with websockets.connect(
-        ws_url,
-        extra_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    ) as ws:
-        async for message in ws:
-            event = json.loads(message)
-            
-            # Log all response events
-            if event["type"].startswith("response."):
-                print(f"[Call {call_id}] {event['type']}")
-            # Specifically watch for tool calls
-            if event["type"] == "response.function_call_arguments.done":
-                print(f"✓✓✓ TOOL CALLED: {event['name']}")
-                print(f"    Arguments: {event['arguments']}")
-
-            if event["type"] == "response.function_call_arguments.error":
-                print(f"✖️✖️✖️ TOOL CALL FAILED: {event['name']}")
-                print(f"    Error: {event['error']}")
-
-            if event["type"] == "conversation.item.created":
-                item = event["item"]
-                if item["type"] == "mcp_list_tools":
-                    print(f"✓ MCP tools loaded: {item['content'][:200]}")
-            
-            # Check if model even TRIES to call tools
-            if event["type"] == "response.output_item.added":
-                item = event["item"]
-                print(f"Response item type: {item['type']}") 
-            # Watch for responses without tools
-            if event["type"] == "response.done":
-                output = event["response"]["output"]
-                has_tool_call = any(
-                    item.get("type") == "function_call" 
-                    for item in output
-                )
-                if not has_tool_call:
-                    print(f"⚠️ Response completed WITHOUT calling any tools")
-                    print(f"   Output items: {[item['type'] for item in output]}")
+    print(f"[CRM] Calling /execute: tool={name} args={json.dumps(arguments)[:200]}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                CRM_EXECUTE_URL,
+                json={"name": name, "arguments": arguments},
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = data.get("result", str(data))
+                    print(f"[CRM] /execute result ({len(result)} chars): {result[:200]}")
+                    return result
+                else:
+                    text = await resp.text()
+                    print(f"[CRM] /execute error {resp.status}: {text[:300]}")
+                    return f"Error calling {name}: HTTP {resp.status} — {text[:200]}"
+    except Exception as exc:
+        print(f"[CRM] /execute exception: {exc}")
+        return f"Error calling {name}: {exc}"
 
 
 # ---------------------------------------------------------------------------
-# 5. reject_call
+# 6. WebSocket sideband — function call handler
+# ---------------------------------------------------------------------------
+async def handle_call_websocket(call_id: str) -> None:
+    """Connect to the OpenAI Realtime WebSocket sideband for a SIP call and
+    handle all function-call events produced by the model.
+
+    Flow for each function call:
+      1. Model emits ``response.function_call_arguments.done``
+      2. We call the CRM /execute endpoint with the tool name + parsed args
+      3. We send ``conversation.item.create`` with the function output
+      4. We send ``response.create`` to resume model generation
+
+    Args:
+        call_id: The SIP call ID returned by the webhook payload.
+    """
+    ws_url = f"wss://api.openai.com/v1/realtime?call_id={call_id}"
+    print(f"[WS] Connecting sideband for call {call_id}")
+
+    try:
+        async with websockets.connect(
+            ws_url,
+            additional_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        ) as ws:
+            print(f"[WS] Sideband connected for call {call_id}")
+
+            # Buffer for streaming function-call arguments keyed by call_id
+            _pending: dict[str, dict] = {}
+
+            async for raw_message in ws:
+                try:
+                    event = json.loads(raw_message)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type", "")
+
+                # ── Track new function-call output items ──────────────────
+                if event_type == "response.output_item.added":
+                    item = event.get("item", {})
+                    if item.get("type") == "function_call":
+                        fn_call_id = item.get("call_id", "")
+                        _pending[fn_call_id] = {
+                            "name": item.get("name", ""),
+                            "arguments": item.get("arguments", ""),
+                        }
+                        print(f"[WS] Function call started: {item.get('name')} (call_id={fn_call_id})")
+
+                # ── Accumulate streaming argument deltas ──────────────────
+                elif event_type == "response.function_call_arguments.delta":
+                    fn_call_id = event.get("call_id", "")
+                    if fn_call_id in _pending:
+                        _pending[fn_call_id]["arguments"] += event.get("delta", "")
+
+                # ── All arguments received — execute the function ─────────
+                elif event_type == "response.function_call_arguments.done":
+                    fn_call_id = event.get("call_id", "")
+                    fn_name = event.get("name", "") or _pending.get(fn_call_id, {}).get("name", "")
+                    fn_args_str = event.get("arguments", "") or _pending.get(fn_call_id, {}).get("arguments", "{}")
+
+                    print(f"[WS] Function call complete: {fn_name}({fn_args_str[:200]})")
+
+                    # Parse arguments
+                    try:
+                        fn_args = json.loads(fn_args_str) if fn_args_str else {}
+                    except json.JSONDecodeError as exc:
+                        print(f"[WS] Failed to parse arguments for {fn_name}: {exc}")
+                        fn_args = {}
+
+                    # Execute via CRM REST endpoint
+                    result_text = await _execute_crm_function(fn_name, fn_args)
+
+                    # Send function output back to model
+                    await ws.send(json.dumps({
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "function_call_output",
+                            "call_id": fn_call_id,
+                            "output": result_text,
+                        },
+                    }))
+
+                    # Resume model generation
+                    await ws.send(json.dumps({"type": "response.create"}))
+
+                    # Clean up buffer
+                    _pending.pop(fn_call_id, None)
+
+                # ── Logging helpers ───────────────────────────────────────
+                elif event_type == "response.done":
+                    output = event.get("response", {}).get("output", [])
+                    has_tool = any(i.get("type") == "function_call" for i in output)
+                    if not has_tool:
+                        print(f"[WS][{call_id}] Response done (no tool calls)")
+
+                elif event_type.startswith("error"):
+                    print(f"[WS][{call_id}] Error event: {json.dumps(event)[:300]}")
+
+    except websockets.exceptions.ConnectionClosedOK:
+        print(f"[WS] Sideband closed normally for call {call_id}")
+    except Exception as exc:
+        print(f"[WS] Sideband error for call {call_id}: {exc}")
+        import traceback
+        traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# 7. reject_call
 # ---------------------------------------------------------------------------
 async def reject_call(call_id: str, status_code: int = 603, reason: str = "Declined") -> dict:
     """Decline an incoming call.
@@ -403,7 +625,7 @@ async def reject_call(call_id: str, status_code: int = 603, reason: str = "Decli
 
 
 # ---------------------------------------------------------------------------
-# 6. hangup_call
+# 8. hangup_call
 # ---------------------------------------------------------------------------
 async def hangup_call(call_id: str, reason: str = "Normal") -> dict:
     """Programmatically end an active call.
@@ -439,7 +661,7 @@ async def hangup_call(call_id: str, reason: str = "Normal") -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 7. transfer_call
+# 9. transfer_call
 # ---------------------------------------------------------------------------
 async def transfer_call(call_id: str, target_uri: str) -> dict:
     """Transfer an active call to another agent or number (SIP REFER).
@@ -473,7 +695,7 @@ async def transfer_call(call_id: str, target_uri: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 8. create_call_record / destroy_call_record
+# 10. create_call_record / destroy_call_record
 # ---------------------------------------------------------------------------
 def create_call_record(call_id: str, caller_number: str, timestamp: str) -> dict:
     """Track an active call in the in-memory store.
@@ -525,8 +747,10 @@ def get_active_calls() -> dict[str, dict]:
 async def _handle_incoming_call(payload: dict) -> tuple[dict, int]:
     """Handle a ``realtime.call.incoming`` event.
 
-    Extracts call metadata and accepts the call. Returns 200 immediately
-    as OpenAI expects a fast response.
+    Extracts call metadata, accepts the call, then launches the WebSocket
+    sideband handler as a background task.  The sideband intercepts all
+    function-call events produced by the model and executes them via the
+    CRM server's /execute endpoint.
 
     Payload structure::
 
@@ -574,8 +798,8 @@ async def _handle_incoming_call(payload: dict) -> tuple[dict, int]:
     # Accept the call
     try:
         result = await accept_call(call_id, sip_headers)
-        # Start monitoring in background (optional)
-        asyncio.create_task(monitor_call(call_id))
+        # Start WebSocket sideband in background to handle function calls
+        asyncio.create_task(handle_call_websocket(call_id))
         return {"status": "accepted", "call_id": call_id, "result": result}, 200
     except Exception as e:
         print(f"[SIP] Error accepting call {call_id}: {e}")
@@ -593,4 +817,3 @@ def log_event(event_type: str, payload: dict) -> None:
     """
     print(f"[SIP] Event logged: {event_type}")
     print(f"[SIP] Payload: {json.dumps(payload)[:500]}")
-
