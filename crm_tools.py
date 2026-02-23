@@ -33,6 +33,19 @@ GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "")
 CALENDLY_API_TOKEN = os.getenv("CALENDLY_API_TOKEN", "")
 CALENDLY_ORGANIZATION_URI = os.getenv("CALENDLY_ORGANIZATION_URI", "")
 
+
+
+# Shop hours
+SHOP_HOURS = {
+    'monday': {'start': '08:00', 'end': '18:00'},
+    'tuesday': {'start': '08:00', 'end': '18:00'},
+    'wednesday': {'start': '08:00', 'end': '18:00'},
+    'thursday': {'start': '08:00', 'end': '18:00'},
+    'friday': {'start': '08:00', 'end': '18:00'},
+    'saturday': {'start': '09:00', 'end': '16:00'},
+    'sunday': None,  # Closed
+}
+
 # Sheet layout — must match headers in the Google Sheet
 SHEET_NAME = "CustomerRecords"
 HEADERS = [
@@ -311,264 +324,290 @@ async def get_service_pricing(service_type: str, vehicle_type: str) -> str:
 # ---------------------------------------------------------------------------
 # Calendly helper
 # ---------------------------------------------------------------------------
-async def _calendly_request(
-    path: str,
-    method: str = "GET",
-    body: Optional[dict] = None,
-) -> dict:
-    """Authenticated Calendly API request.
 
-    Args:
-        path:   URL path starting with "/" (e.g. "/event_types").
-        method: HTTP method (default GET).
-        body:   JSON payload for POST requests.
+"""
+Google Calendar Tools for Auto Shop Appointments
+"""
 
-    Returns:
-        Parsed JSON response dict.
+import os
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+import pytz
 
-    Raises:
-        RuntimeError: If CALENDLY_API_TOKEN is not configured or API returns error.
-    """
-    if not CALENDLY_API_TOKEN:
-        raise RuntimeError("CALENDLY_API_TOKEN is not configured")
+# Configuration
+GOOGLE_CALENDAR_CREDENTIALS_PATH = os.getenv('GOOGLE_CALENDAR_CREDENTIALS_PATH')
+GOOGLE_CALENDAR_ID = os.getenv('GOOGLE_CALENDAR_ID')
+SHOP_TIMEZONE = os.getenv('SHOP_TIMEZONE', 'America/Toronto')
 
-    url = f"https://api.calendly.com{path}"
-    headers = {
-        "Authorization": f"Bearer {CALENDLY_API_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    async with aiohttp.ClientSession() as session:
-        kwargs: dict = {
-            "headers": headers,
-            "timeout": aiohttp.ClientTimeout(total=30),
-        }
-        if body is not None:
-            kwargs["json"] = body
+# Appointment durations (in minutes)
+SERVICE_DURATIONS = {
+    'oil_change': 30,
+    'brake_service': 60,
+    'tire_rotation': 30,
+    'inspection': 45,
+    'engine_diagnostic': 90,
+    'transmission_service': 120,
+    'ac_service': 60,
+    'battery_replacement': 20,
+}
 
-        async with session.request(method, url, **kwargs) as resp:
-            if not resp.ok:
-                text = await resp.text()
-                raise RuntimeError(
-                    f"Calendly API error {resp.status}: {text[:300]}"
-                )
-            return await resp.json()
+# Shop hours
+SHOP_HOURS = {
+    'monday': {'start': '08:00', 'end': '18:00'},
+    'tuesday': {'start': '08:00', 'end': '18:00'},
+    'wednesday': {'start': '08:00', 'end': '18:00'},
+    'thursday': {'start': '08:00', 'end': '18:00'},
+    'friday': {'start': '08:00', 'end': '18:00'},
+    'saturday': {'start': '09:00', 'end': '16:00'},
+    'sunday': None,  # Closed
+}
 
 
-# ---------------------------------------------------------------------------
-# Tool: check_availability
-# Exact port of CalendlyMCPServer.checkAvailability() in calendly-server.ts
-# ---------------------------------------------------------------------------
-async def check_availability(
-    eventTypeUri: str,
-    startTime: str,
-    endTime: str,
-) -> str:
-    """Return available Calendly time slots in the given window.
-
-    Mirrors CalendlyMCPServer.checkAvailability() from calendly-server.ts:
-    - Builds endpoint with per-parameter encodeURIComponent (quote)
-    - Returns plain text when no slots found
-    - Maps slots to {start_time, status, invitees_remaining}
-    - Returns JSON {event_type, search_period, total_slots, available_times}
-    - Raises on API error (caught by dispatch())
-
-    Args:
-        eventTypeUri: Full Calendly event type URI.
-        startTime:    Window start in ISO 8601 (e.g. "2025-12-15T00:00:00Z").
-        endTime:      Window end in ISO 8601 (e.g. "2025-12-21T23:59:59Z").
-
-    Returns:
-        JSON string listing available slots, or plain-text message if none.
-    """
-    print(f"[CRM] check_availability: {eventTypeUri} [{startTime} → {endTime}]")
-
-    # Match TS: `/event_type_available_times?event_type=${encodeURIComponent(...)}&...`
-    endpoint = (
-        f"/event_type_available_times"
-        f"?event_type={quote(eventTypeUri, safe='')}"
-        f"&start_time={quote(startTime, safe='')}"
-        f"&end_time={quote(endTime, safe='')}"
+def get_calendar_service():
+    """Initialize Google Calendar API client"""
+    credentials = service_account.Credentials.from_service_account_file(
+        GOOGLE_CALENDAR_CREDENTIALS_PATH,
+        scopes=['https://www.googleapis.com/auth/calendar']
     )
+    return build('calendar', 'v3', credentials=credentials)
 
-    try:
-        data = await _calendly_request(endpoint)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to check availability: {exc}")
 
-    collection = data.get("collection") or []
-
-    if not collection:
-        # Match TS plain-text response (no JSON wrapper) when empty
-        return f"No available time slots found between {startTime} and {endTime}"
-
-    available_slots = [
+async def check_available_schedule(
+    service_type: str,
+    start_date: Optional[str] = None,
+    days_ahead: int = 7
+) -> Dict:
+    """
+    Check available appointment slots for next N days
+    
+    Args:
+        service_type: Type of service to book
+        start_date: ISO date to start search (default: tomorrow)
+        days_ahead: Number of days to check (default: 7)
+    
+    Returns:
         {
-            "start_time":         slot.get("start_time"),
-            "status":             slot.get("status"),
-            "invitees_remaining": slot.get("invitees_remaining"),
+            "available_slots": [
+                {"datetime": "2024-02-23T09:00:00-05:00", "day": "Friday", "time": "9:00 AM"},
+                ...
+            ],
+            "service_type": "oil_change",
+            "duration_minutes": 30
         }
-        for slot in collection
-    ]
-
-    return json.dumps(
-        {
-            "event_type":    eventTypeUri,
-            "search_period": {"start": startTime, "end": endTime},
-            "total_slots":   len(available_slots),
-            "available_times": available_slots,
-        },
-        indent=2,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Tool: create_event
-# Exact port of CalendlyMCPServer.createEvent() in calendly-server.ts
-# ---------------------------------------------------------------------------
-async def create_event(
-    eventTypeUri: str,
-    customerName: str,
-    customerEmail: str,
-    customerPhone: str = "",
-    preferredDate: str = "",
-    notes: str = "",
-) -> str:
-    """Create a single-use Calendly scheduling link for a customer.
-
-    Mirrors CalendlyMCPServer.createEvent() from calendly-server.ts exactly:
-
-    Step 1 — GET /event_types/{id}  (id = last segment of eventTypeUri)
-    Step 2 — If preferredDate given: check availability for that calendar day
-             (00:00:00Z → 23:59:59Z), keep up to 5 slots as {start_time, status}
-    Step 3 — POST /scheduling_links  {max_event_count:1, owner, owner_type}
-             (no date_setting — simpler link that lets customer pick any slot)
-    Step 4 — Build pre-filled URL: name, email, a1=phone, a2=notes
-             (no date/time appended to URL params)
-    Step 5 — Return JSON {success, message, event_type, customer, booking_url,
-             scheduling_url_expires, workflow, automation_options}
-             + optional available_slots_on_preferred_date / preferred_date
-
-    Args:
-        eventTypeUri:  Full Calendly event type URI.
-        customerName:  Customer full name.
-        customerEmail: Customer email address.
-        customerPhone: Customer phone number, mapped to query param a1. Optional.
-        preferredDate: ISO 8601 date/datetime for availability check. Optional.
-        notes:         Booking notes, mapped to query param a2. Optional.
-
-    Returns:
-        JSON string with booking URL and workflow guidance.
     """
-    print(
-        f"[CRM] create_event: {customerName} <{customerEmail}>, "
-        f"date={preferredDate or 'any'}"
-    )
-
     try:
-        # Step 1 — Get event type details
-        # Use .split('/').pop() to extract just the UUID, same as TS
-        event_type_id = eventTypeUri.split("/")[-1]
-        event_type_data = await _calendly_request(f"/event_types/{event_type_id}")
-        event_type = event_type_data.get("resource", {})
-
-        # Step 2 — Check availability if preferred date provided
-        available_slots: Optional[list] = None
-        if preferredDate:
-            # Extract date portion and build full-day UTC window (matches TS setHours logic)
-            date_str = preferredDate[:10]   # "YYYY-MM-DD"
-            day_start = f"{date_str}T00:00:00Z"
-            day_end   = f"{date_str}T23:59:59Z"
-            avail_endpoint = (
-                f"/event_type_available_times"
-                f"?event_type={quote(eventTypeUri, safe='')}"
-                f"&start_time={quote(day_start, safe='')}"
-                f"&end_time={quote(day_end, safe='')}"
+        service = get_calendar_service()
+        tz = pytz.timezone(SHOP_TIMEZONE)
+        
+        # Parse start date or use tomorrow
+        if start_date:
+            search_start = datetime.fromisoformat(start_date).astimezone(tz)
+        else:
+            search_start = (datetime.now(tz) + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
             )
-            try:
-                avail_data = await _calendly_request(avail_endpoint)
-                # Keep top 5 slots mapped to {start_time, status} — matches TS .slice(0,5).map(...)
-                available_slots = [
-                    {
-                        "start_time": slot.get("start_time"),
-                        "status":     slot.get("status"),
-                    }
-                    for slot in (avail_data.get("collection") or [])[:5]
-                ]
-            except Exception as avail_exc:
-                print(f"[CRM] Could not fetch availability: {avail_exc}")
-                # Matches TS: console.error + continue (no re-raise)
+        
+        search_end = search_start + timedelta(days=days_ahead)
+        
+        # Get duration for service
+        duration_minutes = SERVICE_DURATIONS.get(service_type, 60)
+        
+        # Fetch existing events in time range
+        events_result = service.events().list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=search_start.isoformat(),
+            timeMax=search_end.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        existing_events = events_result.get('items', [])
+        
+        # Generate available slots
+        available_slots = []
+        current_date = search_start
+        
+        while current_date < search_end:
+            day_name = current_date.strftime('%A').lower()
+            
+            # Check if shop is open this day
+            if SHOP_HOURS.get(day_name) is None:
+                current_date += timedelta(days=1)
+                continue
+            
+            shop_day = SHOP_HOURS[day_name]
+            
+            # Parse shop hours for this day
+            start_hour, start_min = map(int, shop_day['start'].split(':'))
+            end_hour, end_min = map(int, shop_day['end'].split(':'))
+            
+            day_start = current_date.replace(hour=start_hour, minute=start_min)
+            day_end = current_date.replace(hour=end_hour, minute=end_min)
+            
+            # Generate 30-minute intervals
+            slot_start = day_start
+            while slot_start + timedelta(minutes=duration_minutes) <= day_end:
+                slot_end = slot_start + timedelta(minutes=duration_minutes)
+                
+                # Check if slot conflicts with existing event
+                is_available = True
+                for event in existing_events:
+                    event_start = datetime.fromisoformat(
+                        event['start'].get('dateTime', event['start'].get('date'))
+                    )
+                    event_end = datetime.fromisoformat(
+                        event['end'].get('dateTime', event['end'].get('date'))
+                    )
+                    
+                    # Check overlap
+                    if not (slot_end <= event_start or slot_start >= event_end):
+                        is_available = False
+                        break
+                
+                if is_available and slot_start > datetime.now(tz):
+                    available_slots.append({
+                        'datetime': slot_start.isoformat(),
+                        'day': slot_start.strftime('%A'),
+                        'date': slot_start.strftime('%B %d, %Y'),
+                        'time': slot_start.strftime('%I:%M %p')
+                    })
+                
+                slot_start += timedelta(minutes=30)  # 30-min intervals
+            
+            current_date += timedelta(days=1)
+        
+        return {
+            'available_slots': available_slots[:20],  # Limit to 20 slots
+            'service_type': service_type,
+            'duration_minutes': duration_minutes,
+            'total_slots_found': len(available_slots)
+        }
+        
+    except Exception as e:
+        return {
+            'error': str(e),
+            'available_slots': []
+        }
 
-        # Step 3 — Create one-time scheduling link (no date_setting — matches TS)
-        link_response = await _calendly_request(
-            "/scheduling_links",
-            method="POST",
-            body={
-                "max_event_count": 1,
-                "owner":           eventTypeUri,
-                "owner_type":      "EventType",
-            },
-        )
-        scheduling_url = link_response["resource"]["booking_url"]
 
-        # Step 4 — Build pre-filled URL with customer info
-        # Matches TS: name, email, a1=phone, a2=notes  (no date/time params)
-        params: dict = {"name": customerName, "email": customerEmail}
-        if customerPhone:
-            params["a1"] = customerPhone
-        if notes:
-            params["a2"] = notes
-        prefilled_url = f"{scheduling_url}?{urlencode(params)}"
+async def book_meeting(
+    customer_name: str,
+    customer_email: str,
+    customer_phone: str,
+    service_type: str,
+    appointment_datetime: str,
+    vehicle_info: Optional[str] = None
+) -> Dict:
+    """
+    Book an appointment in Google Calendar
+    
+    Args:
+        customer_name: Customer full name
+        customer_email: Customer email
+        customer_phone: Customer phone
+        service_type: Type of service
+        appointment_datetime: ISO datetime string
+        vehicle_info: Optional vehicle details
+    
+    Returns:
+        {
+            "success": true,
+            "event_id": "...",
+            "event_link": "https://...",
+            "confirmation": "Appointment confirmed for..."
+        }
+    """
+    try:
+        service = get_calendar_service()
+        tz = pytz.timezone(SHOP_TIMEZONE)
+        
+        # Parse appointment time
+        start_time = datetime.fromisoformat(appointment_datetime).astimezone(tz)
+        
+        # Calculate end time based on service duration
+        duration_minutes = SERVICE_DURATIONS.get(service_type, 60)
+        end_time = start_time + timedelta(minutes=duration_minutes)
+        
+        # Create event
+        event = {
+            'summary': f'{service_type.replace("_", " ").title()} - {customer_name}',
+            'description': f"""
+Customer: {customer_name}
+Phone: {customer_phone}
+Email: {customer_email}
+Service: {service_type.replace("_", " ").title()}
+{f"Vehicle: {vehicle_info}" if vehicle_info else ""}
 
-        # Step 5 — Build response (mirrors TS response object exactly)
-        result: dict = {
-            "success": True,
-            "message": "Appointment booking initiated",
-            "event_type": {
-                "name":        event_type.get("name"),
-                "duration":    event_type.get("duration"),
-                "description": event_type.get("description_plain"),
+Duration: {duration_minutes} minutes
+            """.strip(),
+            'start': {
+                'dateTime': start_time.isoformat(),
+                'timeZone': SHOP_TIMEZONE,
             },
-            "customer": {
-                "name":  customerName,
-                "email": customerEmail,
-                "phone": customerPhone or "Not provided",
+            'end': {
+                'dateTime': end_time.isoformat(),
+                'timeZone': SHOP_TIMEZONE,
             },
-            "booking_url":              prefilled_url,
-            "scheduling_url_expires":   "After 1 booking",
-            "workflow": {
-                "step":   1,
-                "status": "awaiting_customer_confirmation",
-                "next_steps": [
-                    "Send booking link to customer via email or SMS",
-                    "Customer selects available time slot",
-                    "Customer confirms booking",
-                    "System sends confirmation emails",
-                    "Event appears in both calendars",
+            'attendees': [
+                {'email': customer_email, 'displayName': customer_name}
+            ],
+            'reminders': {
+                'useDefault': False,
+                'overrides': [
+                    {'method': 'email', 'minutes': 24 * 60},  # 1 day before
+                    {'method': 'email', 'minutes': 60},        # 1 hour before
                 ],
             },
-            "automation_options": {
-                "email_template": (
-                    f"Hi {customerName},\n\nThank you for booking with us! "
-                    f"Please click the link below to select your preferred appointment time:"
-                    f"\n\n{prefilled_url}\n\nBest regards"
-                ),
-                "sms_template": (
-                    f"Hi {customerName}, book your appointment here: {prefilled_url}"
-                ),
-            },
+        }
+        
+        # Insert event
+        created_event = service.events().insert(
+            calendarId=GOOGLE_CALENDAR_ID,
+            body=event,
+            sendUpdates='all'  # Send email to customer
+        ).execute()
+        
+        return {
+            'success': True,
+            'event_id': created_event['id'],
+            'event_link': created_event.get('htmlLink'),
+            'confirmation': f"Appointment confirmed for {start_time.strftime('%A, %B %d at %I:%M %p')}",
+            'start_time': start_time.isoformat(),
+            'end_time': end_time.isoformat(),
+            'duration_minutes': duration_minutes
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
         }
 
-        # Spread available_slots into result only when present (matches TS `...spread`)
-        if available_slots is not None:
-            result["available_slots_on_preferred_date"] = available_slots
-            result["preferred_date"] = preferredDate
 
-        return json.dumps(result, indent=2)
-
-    except Exception as exc:
-        raise RuntimeError(f"Failed to create event: {exc}")
-
-
+async def cancel_appointment(event_id: str, reason: Optional[str] = None) -> Dict:
+    """Cancel an existing appointment"""
+    try:
+        service = get_calendar_service()
+        
+        # Delete event
+        service.events().delete(
+            calendarId=GOOGLE_CALENDAR_ID,
+            eventId=event_id,
+            sendUpdates='all'  # Notify customer
+        ).execute()
+        
+        return {
+            'success': True,
+            'message': f'Appointment cancelled{f": {reason}" if reason else ""}'
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
 # ---------------------------------------------------------------------------
 # Dispatch helper — used by openai_sip.py WebSocket sideband
 # ---------------------------------------------------------------------------
@@ -576,8 +615,8 @@ _TOOL_MAP = {
     "check_customer_history": check_customer_history,
     "add_customer_record":    add_customer_record,
     "get_service_pricing":    get_service_pricing,
-    "check_availability":     check_availability,
-    "create_event":           create_event,
+    "check_availability":     check_available_schedule,
+    "book_meeting":           book_meeting,
 }
 
 

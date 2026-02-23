@@ -119,55 +119,43 @@ TOOL_DEFINITIONS = [
             "required": ["service_type", "vehicle_type"],
         },
     },
+    # google
     {
         "type": "function",
         "name": "check_availability",
-        "description": (
-            "YOU MUST CALL THIS before suggesting appointment times. "
-            "Do not make up time slots. Customer needs real availability."
-        ),
+        "description": "Get available appointment slots. Call when customer wants to schedule.",
         "parameters": {
             "type": "object",
             "properties": {
-                "eventTypeUri": {
+                "service_type": {
                     "type": "string",
-                    "description": "The Calendly event type URI",
+                    "description": "Service type: oil_change, brake_service, tire_rotation, inspection, etc."
                 },
-                "startTime": {
-                    "type": "string",
-                    "description": "Start of search window (ISO 8601, e.g. 2025-12-15T00:00:00Z)",
-                },
-                "endTime": {
-                    "type": "string",
-                    "description": "End of search window (ISO 8601, e.g. 2025-12-22T23:59:59Z)",
-                },
+                "days_ahead": {
+                    "type": "integer",
+                    "description": "Number of days to check (default 7)"
+                }
             },
-            "required": ["eventTypeUri", "startTime", "endTime"],
-        },
+            "required": ["service_type"]
+        }
     },
     {
         "type": "function",
-        "name": "create_event",
-        "description": (
-            "Create an appointment booking for a customer with a scheduling link. "
-            "Only call this after the customer has explicitly confirmed the appointment."
-        ),
+        "name": "book_meeting",
+        "description": "Book confirmed appointment. Only call after customer explicitly confirms date/time.",
         "parameters": {
             "type": "object",
             "properties": {
-                "eventTypeUri":   {"type": "string", "description": "Calendly event type URI"},
-                "customerName":   {"type": "string", "description": "Customer name"},
-                "customerEmail":  {"type": "string", "description": "Customer email"},
-                "customerPhone":  {"type": "string", "description": "Phone number (optional)"},
-                "preferredDate":  {
-                    "type": "string",
-                    "description": "Preferred ISO datetime (optional, e.g. 2025-12-15T10:00:00Z)",
-                },
-                "notes":          {"type": "string", "description": "Booking notes (optional)"},
+                "customer_name": {"type": "string"},
+                "customer_email": {"type": "string"},
+                "customer_phone": {"type": "string"},
+                "service_type": {"type": "string"},
+                "appointment_datetime": {"type": "string", "description": "ISO datetime"},
+                "vehicle_info": {"type": "string"}
             },
-            "required": ["eventTypeUri", "customerName", "customerEmail"],
-        },
-    },
+            "required": ["customer_name", "customer_email", "customer_phone", "service_type", "appointment_datetime"]
+        }
+    }
 ]
 
 # ---------------------------------------------------------------------------
@@ -364,7 +352,7 @@ def build_session_config(
         "Step 6: If they say yes → STOP TALKING → call check_availability()\n"
         "Step 7: Read 2-3 times from tool result, ask 'Which works for you?'\n"
         "Step 8: After they pick → Say 'Confirming [DATE TIME] for [SERVICE]. Correct?'\n"
-        "Step 9: If yes → call create_event with all details\n\n"
+        "Step 9: If yes → call book_meeting with all details\n\n"
 
         "=== PHONE BEHAVIOR ===\n"
         "- Sound human, use fillers like 'um', 'uh' sparingly\n"
@@ -487,7 +475,7 @@ async def handle_call_websocket(call_id: str) -> None:
     try:
         async with websockets.connect(
             ws_url,
-            additional_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            extra_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
         ) as ws:
             print(f"[WS] Sideband connected for call {call_id}")
 
