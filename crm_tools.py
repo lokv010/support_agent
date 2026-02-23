@@ -378,7 +378,7 @@ async def check_available_schedule(
     service_type: str,
     start_date: Optional[str] = None,
     days_ahead: int = 7
-) -> Dict:
+) -> str:
     """
     Check available appointment slots for next N days
     
@@ -478,18 +478,18 @@ async def check_available_schedule(
             
             current_date += timedelta(days=1)
         
-        return {
+        return json.dumps({
             'available_slots': available_slots[:20],  # Limit to 20 slots
             'service_type': service_type,
             'duration_minutes': duration_minutes,
             'total_slots_found': len(available_slots)
-        }
-        
+        })
+
     except Exception as e:
-        return {
+        return json.dumps({
             'error': str(e),
             'available_slots': []
-        }
+        })
 
 
 async def book_meeting(
@@ -499,7 +499,7 @@ async def book_meeting(
     service_type: str,
     appointment_datetime: str,
     vehicle_info: Optional[str] = None
-) -> Dict:
+) -> str:
     """
     Book an appointment in Google Calendar
     
@@ -569,7 +569,7 @@ Duration: {duration_minutes} minutes
             sendUpdates='all'  # Send email to customer
         ).execute()
         
-        return {
+        return json.dumps({
             'success': True,
             'event_id': created_event['id'],
             'event_link': created_event.get('htmlLink'),
@@ -577,16 +577,16 @@ Duration: {duration_minutes} minutes
             'start_time': start_time.isoformat(),
             'end_time': end_time.isoformat(),
             'duration_minutes': duration_minutes
-        }
-        
+        })
+
     except Exception as e:
-        return {
+        return json.dumps({
             'success': False,
             'error': str(e)
-        }
+        })
 
 
-async def cancel_appointment(event_id: str, reason: Optional[str] = None) -> Dict:
+async def cancel_appointment(event_id: str, reason: Optional[str] = None) -> str:
     """Cancel an existing appointment"""
     try:
         service = get_calendar_service()
@@ -598,16 +598,16 @@ async def cancel_appointment(event_id: str, reason: Optional[str] = None) -> Dic
             sendUpdates='all'  # Notify customer
         ).execute()
         
-        return {
+        return json.dumps({
             'success': True,
             'message': f'Appointment cancelled{f": {reason}" if reason else ""}'
-        }
-        
+        })
+
     except Exception as e:
-        return {
+        return json.dumps({
             'success': False,
             'error': str(e)
-        }
+        })
 # ---------------------------------------------------------------------------
 # Dispatch helper — used by openai_sip.py WebSocket sideband
 # ---------------------------------------------------------------------------
