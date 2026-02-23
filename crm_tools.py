@@ -32,6 +32,7 @@ GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH", "")
 GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "")
 CALENDLY_API_TOKEN = os.getenv("CALENDLY_API_TOKEN", "")
 CALENDLY_ORGANIZATION_URI = os.getenv("CALENDLY_ORGANIZATION_URI", "")
+GOOGLE_CALENDAR_ID= os.getenv("GOOGLE_CALENDAR_ID", "")
 
 
 
@@ -378,7 +379,7 @@ async def check_available_schedule(
     service_type: str,
     start_date: Optional[str] = None,
     days_ahead: int = 7
-) -> Dict:
+) -> str:
     """
     Check available appointment slots for next N days
     
@@ -477,19 +478,19 @@ async def check_available_schedule(
                 slot_start += timedelta(minutes=30)  # 30-min intervals
             
             current_date += timedelta(days=1)
-        
-        return {
+
+        return json.dumps({
             'available_slots': available_slots[:20],  # Limit to 20 slots
             'service_type': service_type,
             'duration_minutes': duration_minutes,
             'total_slots_found': len(available_slots)
-        }
+        })
         
     except Exception as e:
-        return {
+        return json.dumps({
             'error': str(e),
             'available_slots': []
-        }
+        })
 
 
 async def book_meeting(
@@ -499,7 +500,7 @@ async def book_meeting(
     service_type: str,
     appointment_datetime: str,
     vehicle_info: Optional[str] = None
-) -> Dict:
+) -> str:
     """
     Book an appointment in Google Calendar
     
@@ -534,13 +535,13 @@ async def book_meeting(
         event = {
             'summary': f'{service_type.replace("_", " ").title()} - {customer_name}',
             'description': f"""
-Customer: {customer_name}
-Phone: {customer_phone}
-Email: {customer_email}
-Service: {service_type.replace("_", " ").title()}
-{f"Vehicle: {vehicle_info}" if vehicle_info else ""}
+            Customer: {customer_name}
+            Phone: {customer_phone}
+            Email: {customer_email}
+            Service: {service_type.replace("_", " ").title()}
+            {f"Vehicle: {vehicle_info}" if vehicle_info else ""}
 
-Duration: {duration_minutes} minutes
+            Duration: {duration_minutes} minutes
             """.strip(),
             'start': {
                 'dateTime': start_time.isoformat(),
@@ -568,8 +569,8 @@ Duration: {duration_minutes} minutes
             body=event,
             sendUpdates='all'  # Send email to customer
         ).execute()
-        
-        return {
+
+        return json.dumps(  {
             'success': True,
             'event_id': created_event['id'],
             'event_link': created_event.get('htmlLink'),
@@ -577,13 +578,13 @@ Duration: {duration_minutes} minutes
             'start_time': start_time.isoformat(),
             'end_time': end_time.isoformat(),
             'duration_minutes': duration_minutes
-        }
+        })
         
     except Exception as e:
-        return {
+        return json.dumps({
             'success': False,
             'error': str(e)
-        }
+        })
 
 
 async def cancel_appointment(event_id: str, reason: Optional[str] = None) -> Dict:
@@ -597,7 +598,7 @@ async def cancel_appointment(event_id: str, reason: Optional[str] = None) -> Dic
             eventId=event_id,
             sendUpdates='all'  # Notify customer
         ).execute()
-        
+
         return {
             'success': True,
             'message': f'Appointment cancelled{f": {reason}" if reason else ""}'
