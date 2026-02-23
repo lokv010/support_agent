@@ -7,6 +7,7 @@ supenv/
 supenv/bin/
 supenv/lib/
 supenv/include/
+google_cred/
 
 # Static files
 static/audio/*
