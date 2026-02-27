@@ -32,7 +32,10 @@ GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH", "")
 GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "")
 CALENDLY_API_TOKEN = os.getenv("CALENDLY_API_TOKEN", "")
 CALENDLY_ORGANIZATION_URI = os.getenv("CALENDLY_ORGANIZATION_URI", "")
-GOOGLE_CALENDAR_ID= os.getenv("GOOGLE_CALENDAR_ID", "")
+GOOGLE_CALENDAR_ID= os.getenv("GOOGLE_CALENDAR_ID")
+GOOGLE_CALENDAR_CREDENTIALS_PATH = os.getenv('GOOGLE_CALENDAR_CREDENTIALS_PATH')
+SHOP_TIMEZONE = os.getenv('SHOP_TIMEZONE', 'America/Toronto')
+SCOPES_FOR_ACL_MANAGEMENT = 'https://www.googleapis.com/auth/calendar'
 
 
 
@@ -174,14 +177,7 @@ def _sheets_append_row(row: list) -> None:
 # Tool: check_customer_history
 # ---------------------------------------------------------------------------
 async def check_customer_history(phone_number: str) -> str:
-    """Look up a customer by phone number in the Google Sheet.
-
-    Args:
-        phone_number: E.164 or local phone number string.
-
-    Returns:
-        JSON string with found count and list of matching customer records.
-    """
+    """Look up a customer by phone number in the Google Sheet."""
     print(f"[CRM] check_customer_history: phone={phone_number}")
     loop = asyncio.get_event_loop()
 
@@ -224,23 +220,7 @@ async def add_customer_record(
     phone: str = "",
     notes: str = "",
 ) -> str:
-    """Append a new customer record to the Google Sheet.
-
-    Args:
-        name:     Customer full name.
-        email:    Customer email address.
-        issue:    Description of the service issue.
-        status:   Ticket status (open | in-progress | resolved | closed).
-        priority: Priority level (low | medium | high | urgent).
-        make:     Vehicle make (e.g. Toyota). Optional.
-        model:    Vehicle model (e.g. Corolla). Optional.
-        km:       Vehicle kilometres. Optional.
-        phone:    Customer phone number. Optional.
-        notes:    Additional notes. Optional.
-
-    Returns:
-        JSON string with success status and new record ID.
-    """
+    """Append a new customer record to the Google Sheet."""
     print(f"[CRM] add_customer_record: name={name}, email={email}")
     loop = asyncio.get_event_loop()
 
@@ -276,15 +256,7 @@ async def add_customer_record(
 # Tool: get_service_pricing
 # ---------------------------------------------------------------------------
 async def get_service_pricing(service_type: str, vehicle_type: str) -> str:
-    """Return the price for a service/vehicle combination from the static table.
-
-    Args:
-        service_type: e.g. "oil change", "brake service", "full service".
-        vehicle_type: "sedan", "suv", or "truck".
-
-    Returns:
-        JSON string with price and currency, or an error with available options.
-    """
+    """Return the price for a service/vehicle combination from the static table. """
     print(f'[CRM] get_service_pricing: service="{service_type}", vehicle="{vehicle_type}"')
 
     svc_key = service_type.lower().strip()
@@ -337,10 +309,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import pytz
 
-# Configuration
-GOOGLE_CALENDAR_CREDENTIALS_PATH = os.getenv('GOOGLE_CALENDAR_CREDENTIALS_PATH')
-GOOGLE_CALENDAR_ID = os.getenv('GOOGLE_CALENDAR_ID')
-SHOP_TIMEZONE = os.getenv('SHOP_TIMEZONE', 'America/Toronto')
+
 
 # Appointment durations (in minutes)
 SERVICE_DURATIONS = {
@@ -380,24 +349,6 @@ async def check_available_schedule(
     start_date: Optional[str] = None,
     days_ahead: int = 7
 ) -> str:
-    """
-    Check available appointment slots for next N days
-    
-    Args:
-        service_type: Type of service to book
-        start_date: ISO date to start search (default: tomorrow)
-        days_ahead: Number of days to check (default: 7)
-    
-    Returns:
-        {
-            "available_slots": [
-                {"datetime": "2024-02-23T09:00:00-05:00", "day": "Friday", "time": "9:00 AM"},
-                ...
-            ],
-            "service_type": "oil_change",
-            "duration_minutes": 30
-        }
-    """
     try:
         service = get_calendar_service()
         tz = pytz.timezone(SHOP_TIMEZONE)
@@ -501,25 +452,6 @@ async def book_meeting(
     appointment_datetime: str,
     vehicle_info: Optional[str] = None
 ) -> str:
-    """
-    Book an appointment in Google Calendar
-    
-    Args:
-        customer_name: Customer full name
-        customer_email: Customer email
-        customer_phone: Customer phone
-        service_type: Type of service
-        appointment_datetime: ISO datetime string
-        vehicle_info: Optional vehicle details
-    
-    Returns:
-        {
-            "success": true,
-            "event_id": "...",
-            "event_link": "https://...",
-            "confirmation": "Appointment confirmed for..."
-        }
-    """
     try:
         service = get_calendar_service()
         tz = pytz.timezone(SHOP_TIMEZONE)
@@ -528,21 +460,13 @@ async def book_meeting(
         start_time = datetime.fromisoformat(appointment_datetime).astimezone(tz)
         
         # Calculate end time based on service duration
-        duration_minutes = SERVICE_DURATIONS.get(service_type, 60)
+        service_key = service_type.replace(' ', '_').lower()
+        duration_minutes = SERVICE_DURATIONS.get(service_key, 60)
         end_time = start_time + timedelta(minutes=duration_minutes)
         
         # Create event
         event = {
             'summary': f'{service_type.replace("_", " ").title()} - {customer_name}',
-            'description': f"""
-            Customer: {customer_name}
-            Phone: {customer_phone}
-            Email: {customer_email}
-            Service: {service_type.replace("_", " ").title()}
-            {f"Vehicle: {vehicle_info}" if vehicle_info else ""}
-
-            Duration: {duration_minutes} minutes
-            """.strip(),
             'start': {
                 'dateTime': start_time.isoformat(),
                 'timeZone': SHOP_TIMEZONE,
@@ -550,24 +474,14 @@ async def book_meeting(
             'end': {
                 'dateTime': end_time.isoformat(),
                 'timeZone': SHOP_TIMEZONE,
-            },
-            'attendees': [
-                {'email': customer_email, 'displayName': customer_name}
-            ],
-            'reminders': {
-                'useDefault': False,
-                'overrides': [
-                    {'method': 'email', 'minutes': 24 * 60},  # 1 day before
-                    {'method': 'email', 'minutes': 60},        # 1 hour before
-                ],
-            },
+            }
         }
+        print(f"[CRM] Booking event for {customer_name} on {start_time.isoformat()} for service {service_type} google calendar id: {GOOGLE_CALENDAR_ID}")
         
         # Insert event
         created_event = service.events().insert(
             calendarId=GOOGLE_CALENDAR_ID,
-            body=event,
-            sendUpdates='all'  # Send email to customer
+            body=event
         ).execute()
 
         return json.dumps(  {
@@ -622,18 +536,7 @@ _TOOL_MAP = {
 
 
 async def dispatch(tool_name: str, arguments: dict) -> str:
-    """Execute a named CRM tool with the given arguments.
-
-    Used by the WebSocket sideband handler in openai_sip.py so that
-    tool dispatch is a single function call with no HTTP round-trip.
-
-    Args:
-        tool_name:  One of the five supported tool names.
-        arguments:  Dict of keyword arguments for the tool function.
-
-    Returns:
-        Plain-text / JSON result string.
-    """
+    """Execute a named CRM tool with the given arguments."""
     fn = _TOOL_MAP.get(tool_name)
     if fn is None:
         known = ", ".join(_TOOL_MAP.keys())
