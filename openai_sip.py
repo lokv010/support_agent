@@ -97,6 +97,24 @@ TOOL_DEFINITIONS = [
     },
     {
         "type": "function",
+        "name": "create_service_ticket",
+        "description": "Create a service ticket for a customer's vehicle issue.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "customer_id:": {"type": "string", "description": "customer_id from check_customer_history"},
+                "platenumber": {"type": "string", "description": "Vehicle plate number"},
+                "service_type": {"type": "string", "description": "Type of service needed (e.g. oil change, brake repair)"},
+                "service_date": {"type": "string", "description": "Preferred service date (ISO format)"},
+                "km_reading": {"type": "string", "description": "Current kilometres on the vehicle"},
+                "quote": {"type": "string", "description": "Quoted price for the service"},
+            },
+            "required": ["customer_id", "platenumber", "service_type","service_date","km_reading", "quote"],
+        }
+    },
+    {
+        
+        "type": "function",
         "name": "get_service_pricing",
         "description": (
             "YOU MUST CALL THIS before quoting ANY price. "
@@ -335,31 +353,41 @@ def build_session_config(
         "YOUR ROLE:\n"
         "Help customers schedule appointments and resolve issues efficiently over the phone.\n\n"
         "=== ABSOLUTE RULES (NEVER VIOLATE) ===\n"
-        "RULE 1: When customer says a phone number → IMMEDIATELY call check_customer_history. Do not say ANYTHING until you get the result.\n"
-        "RULE 2: When customer mentions a service → IMMEDIATELY call get_service_pricing. Never quote prices without calling this.\n"
-        "RULE 3: When customer wants to book → IMMEDIATELY call check_availability. Never suggest times without calling this.\n"
-        "RULE 4: Maximum 15 words per response. ONE question at a time.\n"
-        "RULE 5: Never say 'let me check' - just call the tool silently.\n\n"
+        "RULE 1: IMMEDIATELY call check_customer_history with the caller's phone number when call starts\n"
+        "RULE 2: For NEW customers → collect name, email, vehicle details → call add_customer_record\n"
+        "RULE 3: For EXISTING customers → greet by name with their vehicle info\n"
+        "RULE 4: When customer mentions a service → IMMEDIATELY call get_service_pricing. Never quote prices without calling this.\n"
+        "RULE 5: After confirming service → call create_service_record with customer_id. For new customer ask for vehicle platenumber, existing customer confirm the vehicle platenumber\n"
+        "RULE 6: When customer wants to book → IMMEDIATELY call check_availability. Never suggest times without calling this.\n"
+        "RULE 7: Maximum 15 words per response. ONE question at a time.\n"
+        "RULE 8: Never say 'let me check' - just call the tool silently.\n\n"
 
         "=== CONVERSATION SCRIPT ===\n"
-        "Step 1: Say 'Hi! This is Sarah from Elite Auto. What's your phone number?'\n"
-        "Step 2: When they say a number → STOP TALKING → call check_customer_history(phone_number='their number')\n"
-        "Step 3: After tool returns:\n"
-        "  - If customer found: Say 'Hey [NAME]! How can I help with your [VEHICLE]?'\n"
-        "  - If new customer: Say 'Thanks! What kind of vehicle do you have?'\n"
-        "Step 4: When they mention service (oil change, brakes, etc) → STOP TALKING → call get_service_pricing(service_type='what they said', vehicle_type='sedan or suv or truck')\n"
-        "Step 5: After tool returns: Say EXACTLY '[SERVICE] is [PRICE from tool]. Want to book it?'\n"
-        "Step 6: If they say yes → STOP TALKING → call check_availability()\n"
-        "Step 7: Read 2-3 times from tool result, ask 'Which works for you?'\n"
-        "Step 8: After they pick → Say 'Confirming [DATE TIME] for [SERVICE]. Correct?'\n"
-        "Step 9: If yes → call book_meeting with all details\n\n"
+        "Step 1: Call check_customer_history(phone_number='{caller_number from SIP}')\n"
+        "Step 2a: IF EXISTING CUSTOMER:\n"
+        "  - Say 'Hi [NAME]! How can I help with your [MAKE MODEL]?'\n"
+        "  - Store customer_id for later\n"
+        "Step 2b: IF NEW CUSTOMER:\n"
+        "  - Say 'Hi! I'm Sarah from Elite Auto. What's your name?'\n"
+        "  - Collect: name, email, vehicle make/model/km\n"
+        "  - Ask 'What brings you in today?'\n"
+        "  - Call add_customer_record with all details\n"
+        "  - Store returned customer_id\n"
+        "Step 3: When service mentioned → call get_service_pricing\n"
+        "Step 4: Quote price, ask if they want to book\n"
+        "Step 5: If yes → call check_availability\n"
+        "Step 6: After time confirmed → call create_service_record with:\n"
+        "  - customer_id (from step 2)\n"
+        "  - plate_num, service_type, service_date, km_reading, quote\n"
+        "Step 7: Then call book_meeting for calendar\n\n"
 
-        "=== PHONE BEHAVIOR ===\n"
-        "- Sound human, use fillers like 'um', 'uh' sparingly\n"
-        "- Never robotic\n"
-        "- Keep it brief and natural\n"
+        "CRITICAL: Always use customer_id from check_customer_history or add_customer_record when calling create_service_record.\n"
+            "=== PHONE BEHAVIOR ===\n"
+            "- Sound human, use fillers like 'um', 'uh' sparingly\n"
+            "- Never robotic\n"
+            "- Keep it brief and natural\n"
     )
-
+    instructions = instructions.replace('{caller_number from SIP}', caller_number or 'unknown')
     # Customize for known VIP callers (example)
     if caller_number and sip_headers:
         vip_header = (sip_headers or {}).get("X-VIP", "")

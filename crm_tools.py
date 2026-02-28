@@ -53,14 +53,14 @@ SHOP_HOURS = {
 # Sheet layout — must match headers in the Google Sheet
 SHEET_NAME = "CustomerRecords"
 HEADERS = [
-    "ID", "Make", "Model", "KM", "Name", "Email", "Phone",
+    "customer_id","ID", "Make", "Model", "KM", "Name", "Email", "Phone",
     "Issue", "Status", "Priority", "Created At", "Updated At", "Notes",
 ]
 # Column index constants (0-based)
-COL_ID, COL_MAKE, COL_MODEL, COL_KM = 0, 1, 2, 3
-COL_NAME, COL_EMAIL, COL_PHONE = 4, 5, 6
-COL_ISSUE, COL_STATUS, COL_PRIORITY = 7, 8, 9
-COL_CREATED, COL_UPDATED, COL_NOTES = 10, 11, 12
+COL_CUSTOMER_ID, COL_ID, COL_MAKE, COL_MODEL, COL_KM = 0, 1, 2, 3, 4
+COL_NAME, COL_EMAIL, COL_PHONE = 5, 6, 7
+COL_ISSUE, COL_STATUS, COL_PRIORITY = 8, 9, 10
+COL_CREATED, COL_UPDATED, COL_NOTES = 11, 12, 13
 
 # ---------------------------------------------------------------------------
 # Service Pricing — static table (mirrors TypeScript SERVICE_PRICING)
@@ -124,6 +124,7 @@ def _row_to_record(row: list) -> dict:
     """Pad a sheet row to full width and return a named dict."""
     row = list(row) + [""] * (len(HEADERS) - len(row))
     return {
+        "customer_id": row[COL_CUSTOMER_ID],
         "id":         row[COL_ID],
         "make":       row[COL_MAKE],
         "model":      row[COL_MODEL],
@@ -139,6 +140,66 @@ def _row_to_record(row: list) -> dict:
         "notes":      row[COL_NOTES],
     }
 
+# Add servicing sheet constants
+SERVICING_SHEET_NAME = "ServicingRecords"
+SERVICING_HEADERS = [
+    "service_id", "customer_id", "platenumber", "service_type", 
+    "service_date", "km_reading", "quote", "status", "created_at", "updated_at", "notes"
+]
+
+async def create_service_record(
+    customer_id: str,
+    service_type: str,
+    service_date: str,
+    km_reading: str,
+    quote: str,
+    platenumber: str = "",
+    notes: str = ""
+) -> str:
+    """Create a servicing record in ServicingRecords sheet"""
+    print(f"[CRM] create_service_record: customer_id={customer_id}, service={service_type}")
+    loop = asyncio.get_event_loop()
+    
+    service_id = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    
+    row = [
+        service_id,
+        customer_id,
+        platenumber,
+        service_type,
+        service_date,
+        km_reading,
+        quote,
+        "scheduled",  # status
+        timestamp,    # created_at
+        timestamp,    # updated_at
+        notes
+    ]
+    
+    try:
+        # Append to ServicingRecords sheet
+        svc = _get_sheets_service()
+        end_col = _col_letter(len(SERVICING_HEADERS))
+        
+        svc.spreadsheets().values().append(
+            spreadsheetId=GOOGLE_SHEETS_SPREADSHEET_ID,
+            range=f"{SERVICING_SHEET_NAME}!A1:{end_col}",
+            valueInputOption="RAW",
+            body={"values": [row]},
+        ).execute()
+        
+        print(f"[CRM] create_service_record: created service_id={service_id}")
+        return json.dumps({
+            "success": True,
+            "service_id": service_id,
+            "customer_id": customer_id,
+            "message": f"Service record created successfully"
+        })
+        
+    except Exception as exc:
+        print(f"[CRM] create_service_record error: {exc}")
+        return json.dumps({"error": f"Failed to create service record: {exc}"})
 
 def _sheets_fetch_all_rows() -> list[list]:
     """Blocking call — fetch every row from the CustomerRecords sheet."""
@@ -198,6 +259,7 @@ async def check_customer_history(phone_number: str) -> str:
     return json.dumps(
         {
             "found": len(matching),
+            "customer_id": matching[0].get("customer_id", ""),
             "phone_number": phone_number,
             "records": matching,
         },
@@ -225,10 +287,12 @@ async def add_customer_record(
     loop = asyncio.get_event_loop()
 
     record_id = str(uuid.uuid4())
+    customer_id = str(uuid.uuid1())  # For simplicity, use the same ID for customer and record
     timestamp = datetime.now(timezone.utc).isoformat()
 
     # Order must match HEADERS exactly
     row = [
+        customer_id,
         record_id, make, model, km,
         name, email, phone,
         issue, status, priority,
@@ -532,6 +596,7 @@ _TOOL_MAP = {
     "get_service_pricing":    get_service_pricing,
     "check_availability":     check_available_schedule,
     "book_meeting":           book_meeting,
+    "create_service_record":  create_service_record,
 }
 
 
